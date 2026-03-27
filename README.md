@@ -19,3 +19,11 @@ git clone https://github.com/yourusername/git-commit-ai
 cd git-commit-ai
 pip install -e .
 ```
+
+```bash
+# Set your new OpenRouter API key
+git-commit-ai config set-key sk-or-your-openrouter-key-here
+
+# Verify it's set
+git-commit-ai config show
+```

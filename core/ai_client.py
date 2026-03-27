@@ -2,22 +2,23 @@ import requests
 import json
 from typing import List, Optional
 
-class DeepSeekClient:
-    def __init__(self, api_key: str, model: str = "openrouter/free", 
+class GeminiClient:
+    def __init__(self, api_key: str, model: str = "gemini-2.0-flash-lite",
                  max_diff_len: int = 5000, temperature: float = 0.7):
         self.api_key = api_key
-        self.model = model
+        self.model = model  # gemini-2.0-flash-lite, gemini-2.0-flash, or gemini-1.5-pro
         self.max_diff_len = max_diff_len
         self.temperature = temperature
-        self.base_url = "https://openrouter.ai/api/v1/chat/completions"
-    
+        # Gemini API endpoint
+        self.base_url = "https://generativelanguage.googleapis.com/v1beta/models"
+
     def generate_commit_messages(self, diff: str) -> List[str]:
-        """Generate multiple commit message options"""
-        
+        """Generate multiple commit message options using Gemini API"""
+
         # Truncate diff if too long
         if len(diff) > self.max_diff_len:
             diff = diff[:self.max_diff_len] + "\n... (truncated)"
-        
+
         prompt = f"""Generate git commit messages for these code changes:
 
 {diff}
@@ -33,66 +34,71 @@ Requirements:
 
 Generate 3 different commit message options. Separate each option with '---'"""
 
+        # Gemini API request format
+        url = f"{self.base_url}/{self.model}:generateContent?key={self.api_key}"
+
         headers = {
-            "Authorization": f"Bearer {self.api_key}",
-            "Content-Type": "application/json",
-            "HTTP-Referer": "http://localhost",
-            "X-Title": "Git Commit Generator"
+            "Content-Type": "application/json"
         }
-        
+
         data = {
-            "model": self.model,
-            "messages": [
+            "contents": [
                 {
-                    "role": "system",
-                    "content": "You are a helpful assistant that generates excellent git commit messages following conventional commits format."
-                },
-                {
-                    "role": "user",
-                    "content": prompt
+                    "parts": [
+                        {
+                            "text": prompt
+                        }
+                    ],
+                    "role": "user"
                 }
             ],
-            "temperature": self.temperature,
-            "max_tokens": 500
+            "system_instruction": {
+                "parts": [
+                    {
+                        "text": "You are a helpful assistant that generates excellent git commit messages following conventional commits format."
+                    }
+                ]
+            },
+            "generationConfig": {
+                "temperature": self.temperature,
+                "maxOutputTokens": 500,
+                "topP": 0.95,
+                "topK": 40
+            }
         }
-        
+
         try:
-            print(f"🔍 Sending request to OpenRouter with model: {self.model}")
-            response = requests.post(self.base_url, headers=headers, json=data)
-            
+            print(f"🔍 Sending request to Gemini with model: {self.model}")
+            response = requests.post(url, headers=headers, json=data)
+
             # Check if request was successful
             if response.status_code != 200:
                 print(f"❌ API returned status {response.status_code}")
                 print(f"Response: {response.text}")
                 return []
-            
+
             result = response.json()
-            
+
             # Check for API errors
             if 'error' in result:
                 print(f"❌ API Error: {result['error']['message']}")
                 return []
-            
-            # SAFELY extract content with multiple fallbacks
+
+            # Extract content from Gemini response
             content = None
-            
-            # Try different response formats
-            if 'choices' in result and len(result['choices']) > 0:
-                choice = result['choices'][0]
-                
-                # OpenRouter format
-                if 'message' in choice and 'content' in choice['message']:
-                    content = choice['message']['content']
-                # Alternative format
-                elif 'text' in choice:
-                    content = choice['text']
-            
+            if 'candidates' in result and len(result['candidates']) > 0:
+                candidate = result['candidates'][0]
+                if 'content' in candidate and 'parts' in candidate['content']:
+                    parts = candidate['content']['parts']
+                    if len(parts) > 0 and 'text' in parts[0]:
+                        content = parts[0]['text']
+
             # If no content found
             if not content:
                 print("❌ No content in API response")
                 print(f"Raw response: {result}")
                 return []
-            
+
             # Split into options
             options = []
             if '---' in content:
@@ -100,16 +106,16 @@ Generate 3 different commit message options. Separate each option with '---'"""
             else:
                 # If no separators, treat as single option
                 options = [content.strip()]
-            
+
             # Filter out any empty options
             options = [opt for opt in options if opt]
-            
+
             if not options:
                 print("❌ No valid commit messages generated")
                 return []
-            
+
             return options
-            
+
         except requests.exceptions.RequestException as e:
             print(f"❌ Network error: {e}")
             if hasattr(e, 'response') and e.response:
@@ -121,5 +127,5 @@ Generate 3 different commit message options. Separate each option with '---'"""
         except Exception as e:
             print(f"❌ Unexpected error: {e}")
             import traceback
-            traceback.print_exc()  # This will show the full error
+            traceback.print_exc()
             return []
