@@ -31,7 +31,21 @@ from .utils import edit_text, print_colored, select_from_menu
 init(autoreset=True)
 
 
-@click.group()
+@click.group(epilog="""\b
+Shortcut Options (runs 'generate' automatically):
+  -a, --add         Stage all changes first
+  -c, --commit      Auto-commit after generation
+  -m, --model TEXT  Ai model to use
+  -y, --copy        Copy message to clipboard only
+  -r, --readme      Generate README.md file for the repository
+  -i, --issue       Generate an issue description
+  \b
+Shortcut Options (runs 'config' automatically):
+  init       Initialize default configuration
+  set-key    Set AI API key
+  set-model  Set AI Model key
+  show       Show current configuration
+""")
 def cli():
     """AI-powered Git commit message generator using DeepSeek"""
     pass
@@ -46,8 +60,11 @@ def cli():
 @click.option(
     "--readme", "-r", is_flag=True, help="Generate README.md file for the repository"
 )
+@click.option(
+    "--issue", "-i", is_flag=True, help="Generate an issue description"
+)
 def generate(
-    path: str, add: bool, commit: bool, model: Optional[str], copy: bool, readme: bool
+    path: str, add: bool, commit: bool, model: Optional[str], copy: bool, readme: bool, issue: bool
 ):
     """Generate commit message for staged changes
 
@@ -86,6 +103,11 @@ def generate(
         # Handle README generation if requested
         if readme:
             generate_readme(repo_root, model)
+            return
+
+        # Handle Issue generation if requested
+        if issue:
+            generate_issue_cmd(model)
             return
 
         # Stage all changes if requested
@@ -177,6 +199,97 @@ def generate(
         # Change back to original directory
         os.chdir(original_dir)
         print_colored(f"\n📁 Returned to: {original_dir}", "cyan")
+
+
+def generate_issue_cmd(model: Optional[str] = None):
+    """Generate a structured Issue"""
+    print_colored("\n📋 Generating new Issue...", "cyan")
+
+    try:
+        context = click.prompt("Enter a short description of the issue or feature", type=str)
+        if not context.strip():
+            print_colored("❌ Description cannot be empty", "red")
+            return
+
+        # Load config
+        config = get_config()
+
+        # Initialize AI client
+        use_model = model or config.get("model", "gemini-2.0-flash-lite")
+        from .ai_client import GeminiClient as AIClient
+
+        client = AIClient(
+            api_key=config["api_key"],
+            model=use_model,
+            temperature=config.get("temperature", 0.7),
+        )
+
+        # Generate Issue content
+        print_colored("🤖 Generating details...", "blue")
+        issue_content = client.generate_issue(context)
+
+        if not issue_content:
+            print_colored("❌ Failed to generate issue", "red")
+            return
+
+        # Show preview
+        print_colored("\n📝 Issue Preview:", "green")
+        print(Fore.WHITE + "=" * 60)
+        print(issue_content)
+        print(Fore.WHITE + "=" * 60)
+
+        # Prompt for next steps
+        print("\n💾 What would you like to do?")
+        print("  [y] Edit before proceeding")
+        print("  [c] Copy to clipboard")
+        print("  [s] Save to file (issue.md)")
+        print("  [n] Cancel")
+        
+        choice = click.prompt(
+            "Select action", 
+            type=click.Choice(['y', 'c', 's', 'n'], case_sensitive=False),
+            default='c'
+        ).lower()
+
+        if choice == 'n':
+            print_colored("❌ Issue generation cancelled", "yellow")
+            return
+            
+        final_issue = issue_content
+        
+        if choice == 'y':
+            print_colored("\nOpening your default text editor to review/edit the Issue...", 'cyan')
+            edited_text = click.edit(text=issue_content)
+            if edited_text is not None:
+                final_issue = edited_text
+            else:
+                print_colored("No changes made in editor.", "blue")
+                
+            # Ask again what to do with the edited text
+            print("\n💾 What now?")
+            print("  [c] Copy to clipboard")
+            print("  [s] Save to file (issue.md)")
+            second_choice = click.prompt(
+                "Select action", 
+                type=click.Choice(['c', 's'], case_sensitive=False),
+                default='c'
+            ).lower()
+            choice = second_choice
+
+        if choice == 'c':
+            pyperclip.copy(final_issue)
+            print_colored("✅ Issue copied to clipboard!", "green")
+        elif choice == 's':
+            with open("issue.md", "w", encoding="utf-8") as f:
+                f.write(final_issue)
+            print_colored(f"✅ Issue saved to issue.md", "green")
+
+    except Exception as e:
+        print_colored(f"❌ Error generating issue: {e}", "red")
+        import traceback
+        traceback.print_exc()
+
+
 
 
 def generate_readme(repo_path: str, model: Optional[str] = None):
