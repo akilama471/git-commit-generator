@@ -32,7 +32,11 @@ Requirements:
 - Use imperative mood ("add" not "added")
 - No line breaks in the first line
 
-Generate 3 different commit message options. Separate each option with '---'"""
+CRITICAL OUTPUT FORMAT REQUIREMENTS:
+- Generate EXACTLY 3 different commit message options.
+- Separate each option with exactly three dashes: '---'
+- Output strictly the commit messages and separators. DO NOT include any introductory greetings, markdown code blocks (like ```), or concluding conversational text.
+"""
 
         # Gemini API request format
         url = f"{self.base_url}/{self.model}:generateContent?key={self.api_key}"
