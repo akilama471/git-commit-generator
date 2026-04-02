@@ -218,14 +218,22 @@ def generate_readme(repo_path: str, model: Optional[str] = None):
         print(Fore.WHITE + "=" * 60)
 
         # Confirm before writing
-        if not click.confirm("\n💾 Write README.md to the repository?"):
+        if not click.confirm("\n💾 Proceed to edit and save README.md?"):
             print_colored("❌ README generation cancelled", "yellow")
+            return
+            
+        print_colored("\nOpening your default text editor to review/edit the README...", 'cyan')
+        print_colored("Save and close the editor when you are finished.", 'yellow')
+        final_readme = click.edit(text=readme_content)
+        
+        if final_readme is None:
+            print_colored("❌ Editing cancelled. README will not be saved.", "yellow")
             return
 
         # Write to file
         readme_path = Path(repo_path) / "README.md"
         with open(readme_path, "w", encoding="utf-8") as f:
-            f.write(readme_content)
+            f.write(final_readme)
 
         print_colored(f"✅ README.md successfully created at: {readme_path}", "green")
 
@@ -275,12 +283,11 @@ Ensure all code examples are in the correct language based on the project's prim
 """
 
     try:
-        # Use the AI client to generate README
-        options = client.generate_commit_messages(prompt)  # Reusing the generate method
+        # Use the AI client to generate README using the new dedicated method
+        readme_output = client.generate_readme(prompt)
 
-        if options:
-            # Return the first option
-            return options[0]
+        if readme_output:
+            return readme_output
         else:
             # Fallback to basic template if AI fails
             return generate_basic_readme(repo_info)
@@ -462,18 +469,14 @@ def status():
 
 def main():
     """Entry point with better default command handling"""
+    # If no arguments, assume generate
     if len(sys.argv) == 1:
-        # No arguments, run generate
         sys.argv.append("generate")
-    elif sys.argv[1] not in [
-        "generate",
-        "config",
-        "status",
-        "--help",
-        "-h",
-    ] and not sys.argv[1].startswith("-"):
-        # If first argument isn't a command but looks like an option, insert 'generate'
+    # If the first argument is not one of the main commands or global help, map it to generate.
+    # This allows `git-commit-ai -c` to evaluate as `git-commit-ai generate -c`
+    elif sys.argv[1] not in ["generate", "config", "status", "--help", "-h"]:
         sys.argv.insert(1, "generate")
+        
     cli()
 
 

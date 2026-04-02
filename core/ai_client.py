@@ -133,3 +133,72 @@ CRITICAL OUTPUT FORMAT REQUIREMENTS:
             import traceback
             traceback.print_exc()
             return []
+
+    def generate_readme(self, prompt: str) -> Optional[str]:
+        """Generate a complete README.md string using Gemini API"""
+        url = f"{self.base_url}/{self.model}:generateContent?key={self.api_key}"
+        headers = {"Content-Type": "application/json"}
+        data = {
+            "contents": [
+                {
+                    "parts": [{"text": prompt}],
+                    "role": "user"
+                }
+            ],
+            "system_instruction": {
+                "parts": [
+                    {
+                        "text": "You are an expert technical writer and developer. Generate a highly structured, accurate, and visually appealing README.md based on the provided project context. Output ONLY the raw markdown content without any prepended conversational text or ```markdown wrapper."
+                    }
+                ]
+            },
+            "generationConfig": {
+                "temperature": self.temperature,
+                "maxOutputTokens": 2000,
+                "topP": 0.95,
+                "topK": 40
+            }
+        }
+        
+        try:
+            print(f"🔍 Sending request to Gemini for README generation with model: {self.model}")
+            response = requests.post(url, headers=headers, json=data)
+            
+            if response.status_code != 200:
+                print(f"❌ API returned status {response.status_code}")
+                return None
+                
+            result = response.json()
+            
+            if 'error' in result:
+                print(f"❌ API Error: {result['error']['message']}")
+                return None
+                
+            content = None
+            if 'candidates' in result and len(result['candidates']) > 0:
+                candidate = result['candidates'][0]
+                if 'content' in candidate and 'parts' in candidate['content']:
+                    parts = candidate['content']['parts']
+                    if len(parts) > 0 and 'text' in parts[0]:
+                        content = parts[0]['text']
+                        
+            if not content:
+                print("❌ No content in API response")
+                return None
+                
+            # Strip markdown block wrappers if model still returns them
+            content = content.strip()
+            if content.startswith("```markdown"):
+                content = content[11:]
+            elif content.startswith("```md"):
+                content = content[5:]
+            if content.startswith("```"):
+                content = content[3:]
+            if content.endswith("```"):
+                content = content[:-3]
+                
+            return content.strip()
+            
+        except Exception as e:
+            print(f"❌ Error generating README: {e}")
+            return None

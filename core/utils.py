@@ -43,19 +43,20 @@ def select_from_menu(options):
             print("\n")
             sys.exit(0)
 
+import click
+
 def edit_text(initial_text):
-    """Multiline text editor using prompt_toolkit"""
-    print_colored("\nEditing commit message:", 'cyan')
-    print_colored("Press [Alt+Enter] or [Esc] followed by [Enter] to save and finish.", 'yellow')
+    """Multiline text editor using click.edit (opens system editor)"""
+    print_colored("\nOpening your default text editor to modify the commit message...", 'cyan')
+    print_colored("Save and close the editor when you are finished.", 'yellow')
     print("-" * 50)
     
-    try:
-        # Use prompt toolkit multiline input for better editing experience
-        edited_text = prompt("> ", default=initial_text, multiline=True)
-        return edited_text.strip()
-    except KeyboardInterrupt:
-        print("\n")
-        sys.exit(0)
-    except EOFError:
-        print("\n")
-        sys.exit(0)
+    # Opens Notepad/Vim/etc and returns the modified text when closed.
+    edited_text = click.edit(text=initial_text)
+    
+    # If the user closed without changing anything or aborted it could return None
+    if edited_text is None:
+        print_colored("Editing cancelled. Keeping original text.", 'yellow')
+        return initial_text.strip()
+        
+    return edited_text.strip()
