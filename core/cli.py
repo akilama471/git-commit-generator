@@ -217,18 +217,34 @@ def generate_readme(repo_path: str, model: Optional[str] = None):
         print(readme_content[:1000] + ("..." if len(readme_content) > 1000 else ""))
         print(Fore.WHITE + "=" * 60)
 
-        # Confirm before writing
-        if not click.confirm("\n💾 Proceed to edit and save README.md?"):
+        # Custom prompt for next steps
+        print("\n💾 Proceed with README.md?")
+        print("  [y] Edit before saving")
+        print("  [s] Save directly (continue)")
+        print("  [n] Cancel")
+        
+        choice = click.prompt(
+            "Select action", 
+            type=click.Choice(['y', 's', 'n'], case_sensitive=False),
+            default='s'
+        ).lower()
+
+        if choice == 'n':
             print_colored("❌ README generation cancelled", "yellow")
             return
             
-        print_colored("\nOpening your default text editor to review/edit the README...", 'cyan')
-        print_colored("Save and close the editor when you are finished.", 'yellow')
-        final_readme = click.edit(text=readme_content)
+        final_readme = readme_content
         
-        if final_readme is None:
-            print_colored("❌ Editing cancelled. README will not be saved.", "yellow")
-            return
+        if choice == 'y':
+            print_colored("\nOpening your default text editor to review/edit the README...", 'cyan')
+            print_colored("Close the editor when you are finished. It will be saved automatically.", 'yellow')
+            edited_text = click.edit(text=readme_content)
+            
+            # click.edit returns None if closed without modification
+            if edited_text is not None:
+                final_readme = edited_text
+            else:
+                print_colored("No changes made in editor. Proceeding with original generation.", "blue")
 
         # Write to file
         readme_path = Path(repo_path) / "README.md"
