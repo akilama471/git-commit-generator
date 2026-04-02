@@ -11,6 +11,7 @@ DEFAULT_CONFIG = {
     "model": "gemini-2.0-flash-lite",
     "max_diff_length": 5000,
     "temperature": 0.7,
+    "github_token": "",
 }
 
 
@@ -56,6 +57,17 @@ def save_model(model_name):
         yaml.dump(config, f, default_flow_style=False)
 
     print("✅ Model key saved successfully!")
+
+
+def save_github_token(token):
+    """Save GitHub token to config"""
+    config = load_config()
+    config["github_token"] = token
+
+    with open(CONFIG_FILE, "w") as f:
+        yaml.dump(config, f, default_flow_style=False)
+
+    print("✅ GitHub token saved successfully!")
 
 
 def get_config():

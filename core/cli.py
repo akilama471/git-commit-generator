@@ -16,7 +16,7 @@ if sys.platform == "win32":
     sys.stderr = io.TextIOWrapper(sys.stderr.buffer, encoding="utf-8", errors="replace")
 
 from .ai_client import GeminiClient  # Or whichever client you're using
-from .config import create_default_config, get_config, save_api_key, save_model
+from .config import create_default_config, get_config, save_api_key, save_model, save_github_token
 from .git_utils import (
     commit_with_message,
     get_repo_info,
@@ -41,10 +41,11 @@ Shortcut Options (runs 'generate' automatically):
   -i, --issue       Generate an issue description
   \b
 Shortcut Options (runs 'config' automatically):
-  init       Initialize default configuration
-  set-key    Set AI API key
-  set-model  Set AI Model key
-  show       Show current configuration
+  init              Initialize default configuration
+  set-github-token  Set GitHub Personal Access Token
+  set-key           Set AI API key
+  set-model         Set AI Model key
+  show              Show current configuration
 """)
 def cli():
     """AI-powered Git commit message generator using DeepSeek"""
@@ -243,11 +244,12 @@ def generate_issue_cmd(model: Optional[str] = None):
         print("  [y] Edit before proceeding")
         print("  [c] Copy to clipboard")
         print("  [s] Save to file (issue.md)")
+        print("  [p] Publish directly to GitHub")
         print("  [n] Cancel")
         
         choice = click.prompt(
             "Select action", 
-            type=click.Choice(['y', 'c', 's', 'n'], case_sensitive=False),
+            type=click.Choice(['y', 'c', 's', 'p', 'n'], case_sensitive=False),
             default='c'
         ).lower()
 
@@ -269,9 +271,10 @@ def generate_issue_cmd(model: Optional[str] = None):
             print("\n💾 What now?")
             print("  [c] Copy to clipboard")
             print("  [s] Save to file (issue.md)")
+            print("  [p] Publish directly to GitHub")
             second_choice = click.prompt(
                 "Select action", 
-                type=click.Choice(['c', 's'], case_sensitive=False),
+                type=click.Choice(['c', 's', 'p'], case_sensitive=False),
                 default='c'
             ).lower()
             choice = second_choice
@@ -283,13 +286,78 @@ def generate_issue_cmd(model: Optional[str] = None):
             with open("issue.md", "w", encoding="utf-8") as f:
                 f.write(final_issue)
             print_colored(f"✅ Issue saved to issue.md", "green")
+        elif choice == 'p':
+            publish_issue_to_github(final_issue, config)
 
     except Exception as e:
         print_colored(f"❌ Error generating issue: {e}", "red")
         import traceback
         traceback.print_exc()
+        
+def publish_issue_to_github(issue_md: str, config: dict):
+    """Publish generated issue markdown directly to GitHub via API"""
+    token = config.get("github_token", "")
+    if not token:
+        print_colored("❌ GitHub token not configured!", "red")
+        print("Please run: git-commit-ai config set-github-token YOUR_TOKEN")
+        print("Get your token from: https://github.com/settings/tokens (requires 'repo' scope)")
+        return
 
+    # Extract owner and repo from remote
+    from .git_utils import run_git_command
+    stdout, _, code = run_git_command(["git", "config", "--get", "remote.origin.url"])
+    if code != 0 or not stdout.strip():
+        print_colored("❌ Could not get git remote 'origin' URL.", "red")
+        return
 
+    remote_url = stdout.strip()
+    import re
+    # Matches https://github.com/owner/repo(.git) or git@github.com:owner/repo(.git)
+    match = re.search(r'github\.com[:/]([^/]+)/([^/]+?)(?:\.git)?$', remote_url)
+    if not match:
+        print_colored("❌ Could not parse GitHub owner and repo from remote origin URL.", "red")
+        return
+
+    owner = match.group(1)
+    repo = match.group(2)
+
+    # Simple title extraction: grab first non-empty line
+    lines = issue_md.split('\n')
+    title = "New Issue"
+    body = issue_md
+    
+    for i, line in enumerate(lines):
+        if line.strip():
+            title = line.lstrip('# *').strip()
+            # Remove the title line from the body
+            body = '\n'.join(lines[i+1:]).strip()
+            break
+
+    print_colored(f"Publishing issue '{title}' to {owner}/{repo}...", "blue")
+    import requests
+    response = requests.post(
+        f"https://api.github.com/repos/{owner}/{repo}/issues",
+        headers={
+            "Authorization": f"token {token}",
+            "Accept": "application/vnd.github.v3+json"
+        },
+        json={"title": title, "body": body}
+    )
+
+    if response.status_code == 201:
+        issue_url = response.json().get("html_url")
+        print_colored(f"✅ Issue published successfully! URL: {issue_url}", "green")
+        import webbrowser
+        try:
+            webbrowser.open(issue_url)
+        except:
+            pass
+    else:
+        print_colored(f"❌ Failed to publish issue. Status Code: {response.status_code}", "red")
+        try:
+            print(response.json())
+        except:
+            print(response.text)
 
 
 def generate_readme(repo_path: str, model: Optional[str] = None):
@@ -566,6 +634,13 @@ def set_key(api_key):
 def set_model(model_name):
     """Set AI Model key"""
     save_model(model_name)
+
+
+@config.command("set-github-token")
+@click.argument("token")
+def set_github_token(token):
+    """Set GitHub Personal Access Token"""
+    save_github_token(token)
 
 
 @config.command("show")
