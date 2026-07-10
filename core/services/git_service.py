@@ -301,6 +301,95 @@ class GitService:
             return None
 
 
+    @staticmethod
+    def get_current_branch(repo_path: Optional[str] = None) -> str:
+        """Get the current active branch name."""
+        try:
+            stdout, _, code = GitService.run_git_command(
+                ["git", "branch", "--show-current"],
+                cwd=repo_path,
+            )
+            if code == 0 and stdout.strip():
+                return stdout.strip()
+            # Fallback for older git versions or detached HEAD
+            stdout, _, code = GitService.run_git_command(
+                ["git", "rev-parse", "--abbrev-ref", "HEAD"],
+                cwd=repo_path,
+            )
+            if code == 0 and stdout.strip():
+                return stdout.strip()
+            return "unknown"
+        except Exception:
+            return "unknown"
+
+    @staticmethod
+    def unstage_all_changes(repo_path: Optional[str] = None) -> bool:
+        """Reset staged changes (unstage all)"""
+        try:
+            _, _, code = GitService.run_git_command(["git", "reset"], cwd=repo_path)
+            return code == 0
+        except Exception:
+            return False
+
+    @staticmethod
+    def get_repo_status_summary(repo_path: Optional[str] = None) -> Dict:
+        """Get summary of repository git status including staged, unstaged, and branch."""
+        summary = {
+            "is_repo": False,
+            "branch": "unknown",
+            "staged_files": [],
+            "unstaged_files": [],
+            "untracked_files": [],
+        }
+        if not repo_path:
+            return summary
+
+        root = GitService.get_repository_root(repo_path)
+        if not root:
+            return summary
+
+        summary["is_repo"] = True
+        summary["branch"] = GitService.get_current_branch(root)
+
+        # Staged files
+        stdout, _, _ = GitService.run_git_command(
+            ["git", "diff", "--cached", "--name-status"],
+            cwd=root,
+        )
+        for line in stdout.splitlines():
+            line = line.strip()
+            if line:
+                parts = line.split(maxsplit=1)
+                status = parts[0] if len(parts) > 0 else "M"
+                filename = parts[1] if len(parts) > 1 else line
+                summary["staged_files"].append({"status": status, "file": filename})
+
+        # Unstaged modified files
+        stdout, _, _ = GitService.run_git_command(
+            ["git", "diff", "--name-status"],
+            cwd=root,
+        )
+        for line in stdout.splitlines():
+            line = line.strip()
+            if line:
+                parts = line.split(maxsplit=1)
+                status = parts[0] if len(parts) > 0 else "M"
+                filename = parts[1] if len(parts) > 1 else line
+                summary["unstaged_files"].append({"status": status, "file": filename})
+
+        # Untracked files
+        stdout, _, _ = GitService.run_git_command(
+            ["git", "ls-files", "--others", "--exclude-standard"],
+            cwd=root,
+        )
+        for line in stdout.splitlines():
+            line = line.strip()
+            if line:
+                summary["untracked_files"].append(line)
+
+        return summary
+
+
 def get_repo_info(repo_path: str) -> Dict:
     return GitService.get_repo_info(repo_path)
 
@@ -321,7 +410,7 @@ def run_git_command(cmd: List[str], cwd: Optional[str] = None) -> Tuple[str, str
     return GitService.run_git_command(cmd, cwd=cwd)
 
 
-def get_staged_diff(repo_path:str) -> Optional[GitDiff]:
+def get_staged_diff(repo_path: str) -> Optional[GitDiff]:
     return GitService.get_staged_diff(repo_path)
 
 
@@ -333,10 +422,23 @@ def stage_all_changes(repo_path: Optional[str] = None) -> bool:
     return GitService.stage_all_changes(repo_path)
 
 
+def unstage_all_changes(repo_path: Optional[str] = None) -> bool:
+    return GitService.unstage_all_changes(repo_path)
+
+
 def commit_with_message(message: str, repo_path: str, commit_datetime: Optional[str] = None) -> bool:
     return GitService.commit_with_message(message, repo_path, commit_datetime)
 
 
 def get_repository_root(repo_path: Optional[str] = None) -> Optional[str]:
     return GitService.get_repository_root(repo_path)
+
+
+def get_current_branch(repo_path: Optional[str] = None) -> str:
+    return GitService.get_current_branch(repo_path)
+
+
+def get_repo_status_summary(repo_path: Optional[str] = None) -> Dict:
+    return GitService.get_repo_status_summary(repo_path)
+
 

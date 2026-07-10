@@ -70,6 +70,23 @@ class ConfigManager:
         print("✅ GitHub token saved successfully!")
 
     @staticmethod
+    def save_settings(settings: dict):
+        """Save a dictionary of settings to config"""
+        config = ConfigManager._load_config()
+        config.update(settings)
+        with open(CONFIG_FILE, "w") as f:
+            yaml.dump(config, f, default_flow_style=False)
+        print("✅ Settings saved successfully!")
+
+    @staticmethod
+    def reset_to_default():
+        """Reset config to default values while optionally keeping api_key if needed"""
+        CONFIG_DIR.mkdir(exist_ok=True)
+        with open(CONFIG_FILE, "w") as f:
+            yaml.dump(DEFAULT_CONFIG.copy(), f, default_flow_style=False)
+        return DEFAULT_CONFIG.copy()
+
+    @staticmethod
     def get_config():
         """Get configuration with validation"""
         config = ConfigManager._load_config()
@@ -78,3 +95,4 @@ class ConfigManager:
             return 400, "API key not configured!"
 
         return 200, config
+

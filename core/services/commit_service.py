@@ -51,7 +51,46 @@ class CommitService:
         # Generate messages
         options = client.generate_commit_messages(git_diff.diff)
 
+        if isinstance(options, str):
+            return options
+
         if not options:
             return "Failed to generate commit messages"
 
         return options[0]
+
+    @staticmethod
+    def generate_commit_options(path: str, model: Optional[str] = None):
+        """Generate all commit message options for staged changes.
+        Returns: (success: bool, result: list[str] | str)
+        """
+        if not path:
+            return False, "Please select a project folder."
+
+        target_path = Path(path).resolve()
+        git_diff = GitService.get_staged_diff(str(target_path))
+
+        if not git_diff or not git_diff.diff:
+            return False, "No staged changes found! Stage changes or click 'Stage All' first."
+
+        status_code, config = ConfigManager.get_config()
+        if status_code != 200:
+            return False, f"Error {status_code}: {config}"
+
+        use_model = model or config.get("model", "gemini-2.0-flash-lite")
+        client = GeminiClient(
+            api_key=config.get("api_key", ""),
+            model=use_model,
+            max_diff_len=config.get("max_diff_length", 5000),
+            temperature=config.get("temperature", 0.7),
+        )
+
+        options = client.generate_commit_messages(git_diff.diff)
+
+        if isinstance(options, str):
+            return False, options
+
+        if not options:
+            return False, "Failed to generate commit messages. Check your API key and network connection."
+
+        return True, options
