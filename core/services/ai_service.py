@@ -148,6 +148,47 @@ CRITICAL OUTPUT CONSTRAINTS:
             traceback.print_exc()
             return []
 
+    @staticmethod
+    def list_available_models(api_key: Optional[str] = None) -> List[str]:
+        """Fetch all available models that support generateContent from the Gemini API."""
+        default_models = [
+            "gemini-2.0-flash-lite",
+            "gemini-2.0-flash",
+            "gemini-2.0-flash-thinking-exp-01-21",
+            "gemini-2.0-pro-exp-02-05",
+            "gemini-1.5-flash",
+            "gemini-1.5-flash-8b",
+            "gemini-1.5-pro",
+            "gemini-exp-1206",
+        ]
+        if not api_key or api_key.strip() in ("", "your-api-key-here"):
+            return default_models
+
+        try:
+            url = f"https://generativelanguage.googleapis.com/v1beta/models?key={api_key.strip()}"
+            response = requests.get(url, timeout=5)
+            if response.status_code == 200:
+                data = response.json()
+                models = []
+                for m in data.get("models", []):
+                    methods = m.get("supportedGenerationMethods", [])
+                    if "generateContent" in methods:
+                        raw_name = m.get("name", "")
+                        clean_name = raw_name.replace("models/", "").strip()
+                        if clean_name.startswith("gemini"):
+                            models.append(clean_name)
+                if models:
+                    # Sort prioritizing 2.0 / flash models first
+                    return sorted(
+                        list(dict.fromkeys(models)),
+                        key=lambda x: (not "2.0" in x, not "flash" in x, x),
+                    )
+            return default_models
+        except Exception as e:
+            print(f"⚠️ Could not fetch remote models: {e}")
+            return default_models
+
+
     def generate_readme(self, prompt: str) -> Optional[str]:
         """Generate a complete README.md string using Gemini API"""
         url = f"{self.base_url}/{self.model}:generateContent?key={self.api_key}"

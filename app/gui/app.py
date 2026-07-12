@@ -7,6 +7,7 @@ from typing import List, Optional
 import customtkinter as ctk
 
 from core.config.config_manager import ConfigManager
+from core.services.ai_service import GeminiClient
 from core.services.commit_service import CommitService
 from core.services.git_service import GitService
 
@@ -45,14 +46,26 @@ class App(ctk.CTk):
         self.show_api_key: bool = False
         self.show_github_token: bool = False
 
+        self.model_options = [
+            "gemini-2.0-flash-lite",
+            "gemini-2.0-flash",
+            "gemini-2.0-flash-thinking-exp-01-21",
+            "gemini-2.0-pro-exp-02-05",
+            "gemini-1.5-flash",
+            "gemini-1.5-flash-8b",
+            "gemini-1.5-pro",
+            "gemini-exp-1206",
+        ]
+
         # Load initial config
         self._load_config_cache()
 
         # Build UI layout
         self._build_ui()
 
-        # Auto-detect git repo from current working directory if available
+        # Auto-detect git repo & background model fetch
         self.after(100, self._auto_detect_current_directory)
+        self.after(500, self._silent_fetch_models)
 
     def _load_config_cache(self):
         try:
@@ -65,6 +78,26 @@ class App(ctk.CTk):
         repo_root = GitService.get_repository_root(cwd)
         if repo_root:
             self._set_project(repo_root)
+
+    def _silent_fetch_models(self):
+        api_key = self.config_data.get("api_key", "")
+        if api_key and api_key != "your-api-key-here":
+            def _worker():
+                models = GeminiClient.list_available_models(api_key)
+                if models:
+                    self.after(0, lambda: self._update_model_dropdown_options(models))
+            threading.Thread(target=_worker, daemon=True).start()
+
+    def _update_model_dropdown_options(self, models: List[str]):
+        if models:
+            self.model_options = models
+            current = self.model_dropdown.get()
+            self.model_dropdown.configure(values=self.model_options)
+            if current in self.model_options:
+                self.model_dropdown.set(current)
+            elif self.model_options:
+                self.model_dropdown.set(self.model_options[0])
+                self.model_status_badge.configure(text=f"🤖 {self.model_options[0]}")
 
     # -------------------------------------------------------------------------
     # UI Skeleton & Navigation
@@ -150,7 +183,7 @@ class App(ctk.CTk):
         bottom_frame = ctk.CTkFrame(self.sidebar, fg_color="transparent")
         bottom_frame.grid(row=6, column=0, sticky="sew", padx=12, pady=14)
 
-        # Active Model Pill Badge
+        # Active Model Pill Badge in Left Navigation Panel
         model_pill_frame = ctk.CTkFrame(
             bottom_frame,
             fg_color=self.COLOR_INNER_BG,
@@ -163,11 +196,12 @@ class App(ctk.CTk):
         self.model_status_badge = ctk.CTkLabel(
             model_pill_frame,
             text=f"🤖 {self.config_data.get('model', 'gemini-2.0-flash-lite')}",
-            font=ctk.CTkFont(family=self.FONT_FAMILY, size=10),
-            text_color=self.COLOR_TEXT_MUTED,
+            font=ctk.CTkFont(family=self.FONT_FAMILY, size=10, weight="bold"),
+            text_color=("gray20", "#93C5FD"),
             anchor="w",
+            wraplength=170,
         )
-        self.model_status_badge.pack(padx=8, pady=4, fill="x")
+        self.model_status_badge.pack(padx=8, pady=5, fill="x")
 
         # Appearance Theme Switcher
         theme_label = ctk.CTkLabel(
@@ -756,20 +790,29 @@ class App(ctk.CTk):
             anchor="w",
         ).pack(side="left")
 
-        self.model_options = [
-            "gemini-2.0-flash-lite",
-            "gemini-2.0-flash",
-            "gemini-1.5-pro",
-            "gemini-1.5-flash",
-        ]
         self.model_dropdown = ctk.CTkOptionMenu(
             model_frame,
             values=self.model_options,
             height=30,
             corner_radius=6,
             font=ctk.CTkFont(family=self.FONT_FAMILY, size=11),
+            command=self._on_model_dropdown_change,
         )
-        self.model_dropdown.pack(side="left", fill="x", expand=True)
+        self.model_dropdown.pack(side="left", fill="x", expand=True, padx=(0, 6))
+
+        self.fetch_models_btn = ctk.CTkButton(
+            model_frame,
+            text="🔄 Fetch Models",
+            width=100,
+            height=30,
+            corner_radius=6,
+            fg_color=("gray75", "#2C313C"),
+            hover_color=("gray65", "#3A4150"),
+            text_color=("gray10", "gray95"),
+            font=ctk.CTkFont(family=self.FONT_FAMILY, size=10, weight="bold"),
+            command=self.fetch_available_models_async,
+        )
+        self.fetch_models_btn.pack(side="left")
 
         # Temperature Slider Row
         temp_frame = ctk.CTkFrame(ai_card, fg_color="transparent")
@@ -905,6 +948,38 @@ class App(ctk.CTk):
 
         return view
 
+    def _on_model_dropdown_change(self, choice: str):
+        """Immediately update the sidebar active model badge when dropdown selection changes."""
+        self.model_status_badge.configure(text=f"🤖 {choice}")
+
+    def fetch_available_models_async(self):
+        """Fetch all available Gemini models from Google AI API."""
+        api_key = self.api_key_entry.get().strip() or self.config_data.get("api_key", "")
+        if not api_key or api_key == "your-api-key-here":
+            messagebox.showwarning("API Key Required", "Please enter a valid Gemini API key first.")
+            return
+
+        self.fetch_models_btn.configure(state="disabled", text="⏳ Loading...")
+        self.config_status_label.configure(text="Fetching available models...", text_color="#3B82F6")
+
+        def _worker():
+            models = GeminiClient.list_available_models(api_key)
+            self.after(0, lambda: self._on_models_fetched(models))
+
+        threading.Thread(target=_worker, daemon=True).start()
+
+    def _on_models_fetched(self, models: List[str]):
+        self.fetch_models_btn.configure(state="normal", text="🔄 Fetch Models")
+        if models:
+            self._update_model_dropdown_options(models)
+            self.config_status_label.configure(
+                text=f"✓ Loaded {len(models)} available model(s)",
+                text_color=self.COLOR_SUCCESS[1],
+            )
+            self.after(3000, lambda: self.config_status_label.configure(text=""))
+        else:
+            self.config_status_label.configure(text="⚠️ Failed to fetch models", text_color=self.COLOR_DANGER[1])
+
     def _toggle_api_key_visibility(self):
         self.show_api_key = not self.show_api_key
         self.api_key_entry.configure(show="" if self.show_api_key else "*")
@@ -924,10 +999,12 @@ class App(ctk.CTk):
         self.api_key_entry.insert(0, cfg.get("api_key", ""))
 
         model = cfg.get("model", "gemini-2.0-flash-lite")
-        if model in self.model_options:
-            self.model_dropdown.set(model)
-        else:
-            self.model_dropdown.set("gemini-2.0-flash-lite")
+        if model not in self.model_options:
+            self.model_options.insert(0, model)
+            self.model_dropdown.configure(values=self.model_options)
+
+        self.model_dropdown.set(model)
+        self.model_status_badge.configure(text=f"🤖 {model}")
 
         temp = float(cfg.get("temperature", 0.7))
         self.temp_slider.set(temp)
