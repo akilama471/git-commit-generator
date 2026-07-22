@@ -17,7 +17,7 @@ ctk.set_default_color_theme("blue")
 
 
 class App(ctk.CTk):
-    """Modern, clean, and compact AI Git Commit Generator GUI."""
+    """Modern, clean, and compact AI Git Commit Generator GUI with Push support."""
 
     FONT_FAMILY = "Segoe UI"
     MONO_FONT = "Consolas"
@@ -26,6 +26,8 @@ class App(ctk.CTk):
     COLOR_PRIMARY_HOVER = ("#1D4ED8", "#60A5FA")
     COLOR_SUCCESS = ("#059669", "#10B981")
     COLOR_SUCCESS_HOVER = ("#047857", "#34D399")
+    COLOR_PURPLE = ("#7C3AED", "#8B5CF6")
+    COLOR_PURPLE_HOVER = ("#6D28D9", "#A78BFA")
     COLOR_DANGER = ("#DC2626", "#EF4444")
     COLOR_CARD_BG = ("#F3F4F6", "#1E2026")
     COLOR_INNER_BG = ("#E5E7EB", "#181A1F")
@@ -36,8 +38,8 @@ class App(ctk.CTk):
         super().__init__()
 
         self.title("AI Git Commit Generator")
-        self.geometry("940x630")
-        self.minsize(860, 540)
+        self.geometry("960x640")
+        self.minsize(880, 550)
 
         self.project_path: Optional[str] = None
         self.current_view: str = "Generator"
@@ -309,7 +311,7 @@ class App(ctk.CTk):
         self.browse_btn = ctk.CTkButton(
             actions_frame,
             text="Browse",
-            width=70,
+            width=65,
             height=30,
             corner_radius=6,
             font=ctk.CTkFont(family=self.FONT_FAMILY, size=11),
@@ -320,7 +322,7 @@ class App(ctk.CTk):
         self.stage_all_btn = ctk.CTkButton(
             actions_frame,
             text="+ Stage All",
-            width=80,
+            width=75,
             height=30,
             corner_radius=6,
             fg_color=("gray75", "#2C313C"),
@@ -330,6 +332,19 @@ class App(ctk.CTk):
             command=self.stage_all_changes_ui,
         )
         self.stage_all_btn.pack(side="left", padx=2)
+
+        self.top_push_btn = ctk.CTkButton(
+            actions_frame,
+            text="🚀 Push",
+            width=65,
+            height=30,
+            corner_radius=6,
+            fg_color=self.COLOR_PURPLE,
+            hover_color=self.COLOR_PURPLE_HOVER,
+            font=ctk.CTkFont(family=self.FONT_FAMILY, size=11, weight="bold"),
+            command=self.push_commits_async,
+        )
+        self.top_push_btn.pack(side="left", padx=2)
 
         self.refresh_repo_btn = ctk.CTkButton(
             actions_frame,
@@ -356,6 +371,9 @@ class App(ctk.CTk):
 
         self.unstaged_badge = self._create_badge(self.badge_strip, "● 0 modified", "#6B7280")
         self.unstaged_badge.pack(side="left", padx=(0, 6))
+
+        self.unpushed_badge = self._create_badge(self.badge_strip, "↑ 0 unpushed", "#6B7280")
+        self.unpushed_badge.pack(side="left", padx=(0, 6))
 
         self.repo_name_label = ctk.CTkLabel(
             self.badge_strip,
@@ -535,27 +553,50 @@ class App(ctk.CTk):
             action_inner,
             text="✨ Generate AI Commit",
             height=34,
-            width=170,
+            width=165,
             corner_radius=8,
             font=ctk.CTkFont(family=self.FONT_FAMILY, size=12, weight="bold"),
             fg_color=self.COLOR_PRIMARY,
             hover_color=self.COLOR_PRIMARY_HOVER,
             command=self.generate_commit_message_async,
         )
-        self.generate_button.pack(side="left", padx=(0, 8))
+        self.generate_button.pack(side="left", padx=(0, 6))
 
         self.create_button = ctk.CTkButton(
             action_inner,
             text="✓ Commit to Git",
             height=34,
-            width=140,
+            width=135,
             corner_radius=8,
             font=ctk.CTkFont(family=self.FONT_FAMILY, size=12, weight="bold"),
             fg_color=self.COLOR_SUCCESS,
             hover_color=self.COLOR_SUCCESS_HOVER,
             command=self.create_commit,
         )
-        self.create_button.pack(side="left", padx=(0, 10))
+        self.create_button.pack(side="left", padx=(0, 6))
+
+        self.push_button = ctk.CTkButton(
+            action_inner,
+            text="🚀 Push to Remote",
+            height=34,
+            width=135,
+            corner_radius=8,
+            font=ctk.CTkFont(family=self.FONT_FAMILY, size=12, weight="bold"),
+            fg_color=self.COLOR_PURPLE,
+            hover_color=self.COLOR_PURPLE_HOVER,
+            command=self.push_commits_async,
+        )
+        self.push_button.pack(side="left", padx=(0, 10))
+
+        self.auto_push_var = ctk.BooleanVar(value=False)
+        self.auto_push_cb = ctk.CTkCheckBox(
+            action_inner,
+            text="Auto-push",
+            variable=self.auto_push_var,
+            font=ctk.CTkFont(family=self.FONT_FAMILY, size=11),
+            width=85,
+        )
+        self.auto_push_cb.pack(side="left", padx=(0, 8))
 
         # Real-time Status Indicator Label
         self.status_label = ctk.CTkLabel(
@@ -635,7 +676,7 @@ class App(ctk.CTk):
         ctk.CTkButton(
             diff_actions,
             text="- Unstage All",
-            width=90,
+            width=85,
             height=28,
             corner_radius=6,
             fg_color=("gray75", "#2C313C"),
@@ -643,6 +684,18 @@ class App(ctk.CTk):
             text_color=("gray10", "gray95"),
             font=ctk.CTkFont(family=self.FONT_FAMILY, size=11),
             command=self.unstage_all_changes_ui,
+        ).pack(side="left", padx=2)
+
+        ctk.CTkButton(
+            diff_actions,
+            text="🚀 Push",
+            width=70,
+            height=28,
+            corner_radius=6,
+            fg_color=self.COLOR_PURPLE,
+            hover_color=self.COLOR_PURPLE_HOVER,
+            font=ctk.CTkFont(family=self.FONT_FAMILY, size=11, weight="bold"),
+            command=self.push_commits_async,
         ).pack(side="left", padx=2)
 
         ctk.CTkButton(
@@ -692,7 +745,8 @@ class App(ctk.CTk):
 
         lines = []
         lines.append(f"# Repository: {Path(self.project_path).name}")
-        lines.append(f"# Active Branch: {status_summary.get('branch', 'unknown')}\n")
+        lines.append(f"# Active Branch: {status_summary.get('branch', 'unknown')}")
+        lines.append(f"# Unpushed Commits: {status_summary.get('unpushed_count', 0)}\n")
 
         lines.append("## Staged Files (will be analyzed for commit):")
         staged = status_summary.get("staged_files", [])
@@ -1193,11 +1247,13 @@ class App(ctk.CTk):
             self._set_badge_text(self.branch_badge, "🌿 None", "#EF4444")
             self._set_badge_text(self.staged_badge, "● 0 staged", "#6B7280")
             self._set_badge_text(self.unstaged_badge, "● 0 modified", "#6B7280")
+            self._set_badge_text(self.unpushed_badge, "↑ 0 unpushed", "#6B7280")
             return
 
         branch = summary.get("branch", "unknown")
         staged_count = len(summary.get("staged_files", []))
         unstaged_count = len(summary.get("unstaged_files", []))
+        unpushed_count = summary.get("unpushed_count", 0)
 
         self._set_badge_text(self.branch_badge, f"🌿 {branch}", "#3B82F6")
         self._set_badge_text(
@@ -1210,9 +1266,18 @@ class App(ctk.CTk):
             f"● {unstaged_count} modified",
             "#F59E0B" if unstaged_count > 0 else "#6B7280",
         )
+        self._set_badge_text(
+            self.unpushed_badge,
+            f"↑ {unpushed_count} unpushed",
+            self.COLOR_PURPLE[1] if unpushed_count > 0 else "#6B7280",
+        )
+
+        status_txt = f"● Ready • {staged_count} staged"
+        if unpushed_count > 0:
+            status_txt += f" • {unpushed_count} unpushed commit(s)"
 
         self.status_label.configure(
-            text=f"● Ready • {staged_count} file(s) staged for commit",
+            text=status_txt,
             text_color=self.COLOR_SUCCESS[1] if staged_count > 0 else self.COLOR_TEXT_MUTED,
         )
 
@@ -1324,7 +1389,6 @@ class App(ctk.CTk):
                 text="✓ Commit created successfully!",
                 text_color=self.COLOR_SUCCESS[1],
             )
-            messagebox.showinfo("Success", "Git commit created successfully.")
             self.commit_text.delete("1.0", "end")
             self.generated_options = []
             self._render_option_pills()
@@ -1332,12 +1396,54 @@ class App(ctk.CTk):
             self.refresh_git_status()
             if self.current_view == "Diff":
                 self._refresh_diff_view()
+
+            # Auto-push if enabled
+            if self.auto_push_var.get():
+                self.push_commits_async()
+            else:
+                messagebox.showinfo("Success", "Git commit created successfully.")
         else:
             self.status_label.configure(text="❌ Commit failed", text_color=self.COLOR_DANGER[1])
             messagebox.showerror(
                 "Commit Failed",
                 "Failed to create the commit. Please ensure there are staged changes and try again.",
             )
+
+    # -------------------------------------------------------------------------
+    # Push Execution
+    # -------------------------------------------------------------------------
+    def push_commits_async(self):
+        project = (self.project_entry.get() or "").strip() or self.project_path
+        if not project:
+            messagebox.showwarning("Project Required", "Please select a project folder.")
+            return
+
+        self.status_label.configure(text="⏳ Pushing commits to remote...", text_color=self.COLOR_PURPLE[1])
+        self.push_button.configure(state="disabled", text="🚀 Pushing...")
+        self.top_push_btn.configure(state="disabled")
+
+        def _worker():
+            success, msg = GitService.push_commits(project)
+            self.after(0, lambda: self._on_push_complete(success, msg))
+
+        threading.Thread(target=_worker, daemon=True).start()
+
+    def _on_push_complete(self, success: bool, msg: str):
+        self.push_button.configure(state="normal", text="🚀 Push to Remote")
+        self.top_push_btn.configure(state="normal")
+        self.refresh_git_status()
+        if self.current_view == "Diff":
+            self._refresh_diff_view()
+
+        if success:
+            self.status_label.configure(
+                text="✓ Pushed to remote successfully!",
+                text_color=self.COLOR_SUCCESS[1],
+            )
+            messagebox.showinfo("Push Success", f"Successfully pushed commits to remote:\n\n{msg}")
+        else:
+            self.status_label.configure(text="❌ Push failed", text_color=self.COLOR_DANGER[1])
+            messagebox.showerror("Push Failed", f"Failed to push commits to remote:\n\n{msg}")
 
 
 if __name__ == "__main__":

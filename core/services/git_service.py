@@ -387,7 +387,52 @@ class GitService:
             if line:
                 summary["untracked_files"].append(line)
 
+        # Unpushed count
+        summary["unpushed_count"] = GitService.get_unpushed_commits_count(root)
+
         return summary
+
+    @staticmethod
+    def get_unpushed_commits_count(repo_path: Optional[str] = None) -> int:
+        """Get the number of unpushed commits on current branch."""
+        try:
+            root = GitService.get_repository_root(repo_path)
+            if not root:
+                return 0
+            stdout, _, code = GitService.run_git_command(
+                ["git", "rev-list", "@{u}..HEAD", "--count"],
+                cwd=root,
+            )
+            if code == 0 and stdout.strip().isdigit():
+                return int(stdout.strip())
+            return 0
+        except Exception:
+            return 0
+
+    @staticmethod
+    def push_commits(repo_path: Optional[str] = None, remote: str = "origin", branch: Optional[str] = None) -> Tuple[bool, str]:
+        """Push commits to the remote repository. Returns (success, message)."""
+        try:
+            root = GitService.get_repository_root(repo_path)
+            if not root:
+                return False, "Not a valid git repository."
+
+            curr_branch = GitService.get_current_branch(root)
+            cmd = ["git", "push"]
+            if remote and branch:
+                cmd.extend([remote, branch])
+            elif remote and curr_branch and curr_branch != "unknown":
+                cmd.extend(["-u", remote, curr_branch])
+
+            stdout, stderr, code = GitService.run_git_command(cmd, cwd=root)
+            if code == 0:
+                msg = stdout.strip() or stderr.strip() or "Pushed to remote successfully."
+                return True, msg
+            else:
+                err = stderr.strip() or stdout.strip() or "Push failed."
+                return False, err
+        except Exception as e:
+            return False, str(e)
 
 
 def get_repo_info(repo_path: str) -> Dict:
@@ -430,6 +475,14 @@ def commit_with_message(message: str, repo_path: str, commit_datetime: Optional[
     return GitService.commit_with_message(message, repo_path, commit_datetime)
 
 
+def push_commits(repo_path: Optional[str] = None, remote: str = "origin", branch: Optional[str] = None) -> Tuple[bool, str]:
+    return GitService.push_commits(repo_path, remote, branch)
+
+
+def get_unpushed_commits_count(repo_path: Optional[str] = None) -> int:
+    return GitService.get_unpushed_commits_count(repo_path)
+
+
 def get_repository_root(repo_path: Optional[str] = None) -> Optional[str]:
     return GitService.get_repository_root(repo_path)
 
@@ -440,5 +493,6 @@ def get_current_branch(repo_path: Optional[str] = None) -> str:
 
 def get_repo_status_summary(repo_path: Optional[str] = None) -> Dict:
     return GitService.get_repo_status_summary(repo_path)
+
 
 
