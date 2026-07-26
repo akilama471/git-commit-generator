@@ -2,7 +2,7 @@ import threading
 from datetime import datetime
 from pathlib import Path
 from tkinter import filedialog, messagebox
-from typing import List, Optional
+from typing import Dict, List, Optional
 
 import customtkinter as ctk
 
@@ -17,7 +17,7 @@ ctk.set_default_color_theme("blue")
 
 
 class App(ctk.CTk):
-    """Modern, clean, and compact AI Git Commit Generator GUI with Push support."""
+    """Modern, clean, and compact AI Git Commit Generator GUI with Pull, Push, and Selective Staging."""
 
     FONT_FAMILY = "Segoe UI"
     MONO_FONT = "Consolas"
@@ -28,6 +28,8 @@ class App(ctk.CTk):
     COLOR_SUCCESS_HOVER = ("#047857", "#34D399")
     COLOR_PURPLE = ("#7C3AED", "#8B5CF6")
     COLOR_PURPLE_HOVER = ("#6D28D9", "#A78BFA")
+    COLOR_TEAL = ("#0D9488", "#14B8A6")
+    COLOR_TEAL_HOVER = ("#0F766E", "#2DD4BF")
     COLOR_DANGER = ("#DC2626", "#EF4444")
     COLOR_CARD_BG = ("#F3F4F6", "#1E2026")
     COLOR_INNER_BG = ("#E5E7EB", "#181A1F")
@@ -38,8 +40,8 @@ class App(ctk.CTk):
         super().__init__()
 
         self.title("AI Git Commit Generator")
-        self.geometry("960x640")
-        self.minsize(880, 550)
+        self.geometry("980x650")
+        self.minsize(900, 560)
 
         self.project_path: Optional[str] = None
         self.current_view: str = "Generator"
@@ -47,6 +49,7 @@ class App(ctk.CTk):
         self.selected_option_idx: int = 0
         self.show_api_key: bool = False
         self.show_github_token: bool = False
+        self.selected_diff_file: Optional[str] = None
 
         self.model_options = [
             "gemini-2.0-flash-lite",
@@ -144,7 +147,7 @@ class App(ctk.CTk):
 
         brand_sub = ctk.CTkLabel(
             title_text_frame,
-            text="v1.2 • AI Generator",
+            text="v1.3 • AI Generator",
             font=ctk.CTkFont(family=self.FONT_FAMILY, size=10),
             text_color=self.COLOR_TEXT_MUTED,
         )
@@ -311,7 +314,7 @@ class App(ctk.CTk):
         self.browse_btn = ctk.CTkButton(
             actions_frame,
             text="Browse",
-            width=65,
+            width=62,
             height=30,
             corner_radius=6,
             font=ctk.CTkFont(family=self.FONT_FAMILY, size=11),
@@ -322,7 +325,7 @@ class App(ctk.CTk):
         self.stage_all_btn = ctk.CTkButton(
             actions_frame,
             text="+ Stage All",
-            width=75,
+            width=72,
             height=30,
             corner_radius=6,
             fg_color=("gray75", "#2C313C"),
@@ -333,10 +336,23 @@ class App(ctk.CTk):
         )
         self.stage_all_btn.pack(side="left", padx=2)
 
+        self.top_pull_btn = ctk.CTkButton(
+            actions_frame,
+            text="📥 Pull",
+            width=60,
+            height=30,
+            corner_radius=6,
+            fg_color=self.COLOR_TEAL,
+            hover_color=self.COLOR_TEAL_HOVER,
+            font=ctk.CTkFont(family=self.FONT_FAMILY, size=11, weight="bold"),
+            command=self.pull_commits_async,
+        )
+        self.top_pull_btn.pack(side="left", padx=2)
+
         self.top_push_btn = ctk.CTkButton(
             actions_frame,
             text="🚀 Push",
-            width=65,
+            width=62,
             height=30,
             corner_radius=6,
             fg_color=self.COLOR_PURPLE,
@@ -575,6 +591,19 @@ class App(ctk.CTk):
         )
         self.create_button.pack(side="left", padx=(0, 6))
 
+        self.pull_button = ctk.CTkButton(
+            action_inner,
+            text="📥 Pull",
+            height=34,
+            width=80,
+            corner_radius=8,
+            font=ctk.CTkFont(family=self.FONT_FAMILY, size=12, weight="bold"),
+            fg_color=self.COLOR_TEAL,
+            hover_color=self.COLOR_TEAL_HOVER,
+            command=self.pull_commits_async,
+        )
+        self.pull_button.pack(side="left", padx=(0, 6))
+
         self.push_button = ctk.CTkButton(
             action_inner,
             text="🚀 Push to Remote",
@@ -586,7 +615,7 @@ class App(ctk.CTk):
             hover_color=self.COLOR_PURPLE_HOVER,
             command=self.push_commits_async,
         )
-        self.push_button.pack(side="left", padx=(0, 10))
+        self.push_button.pack(side="left", padx=(0, 8))
 
         self.auto_push_var = ctk.BooleanVar(value=False)
         self.auto_push_cb = ctk.CTkCheckBox(
@@ -634,7 +663,7 @@ class App(ctk.CTk):
             badge.label.configure(text_color=color_hex)
 
     # -------------------------------------------------------------------------
-    # 2. Changes & Diff View (Dedicated Tab)
+    # 2. Changes & Diff View (Dedicated Tab with Interactive File Checklist)
     # -------------------------------------------------------------------------
     def _build_diff_view(self) -> ctk.CTkFrame:
         view = ctk.CTkFrame(self.main_container, fg_color="transparent")
@@ -656,7 +685,7 @@ class App(ctk.CTk):
 
         ctk.CTkLabel(
             diff_header_inner,
-            text="📁 Staged & Working Changes",
+            text="📁 Changes & Selective Staging",
             font=ctk.CTkFont(family=self.FONT_FAMILY, size=13, weight="bold"),
         ).pack(side="left")
 
@@ -666,7 +695,7 @@ class App(ctk.CTk):
         ctk.CTkButton(
             diff_actions,
             text="+ Stage All",
-            width=80,
+            width=75,
             height=28,
             corner_radius=6,
             font=ctk.CTkFont(family=self.FONT_FAMILY, size=11),
@@ -688,8 +717,20 @@ class App(ctk.CTk):
 
         ctk.CTkButton(
             diff_actions,
+            text="📥 Pull",
+            width=60,
+            height=28,
+            corner_radius=6,
+            fg_color=self.COLOR_TEAL,
+            hover_color=self.COLOR_TEAL_HOVER,
+            font=ctk.CTkFont(family=self.FONT_FAMILY, size=11, weight="bold"),
+            command=self.pull_commits_async,
+        ).pack(side="left", padx=2)
+
+        ctk.CTkButton(
+            diff_actions,
             text="🚀 Push",
-            width=70,
+            width=65,
             height=28,
             corner_radius=6,
             fg_color=self.COLOR_PURPLE,
@@ -711,25 +752,86 @@ class App(ctk.CTk):
             command=self._refresh_diff_view,
         ).pack(side="left", padx=2)
 
-        # Main Diff Content Area
-        diff_card = ctk.CTkFrame(
-            view,
+        # Split Content Area: Left = File Checklist, Right = Diff Viewer
+        split_card = ctk.CTkFrame(view, fg_color="transparent")
+        split_card.grid(row=1, column=0, sticky="nsew")
+        split_card.grid_rowconfigure(0, weight=1)
+        split_card.grid_columnconfigure(0, weight=4)  # Left checklist (40%)
+        split_card.grid_columnconfigure(1, weight=6)  # Right diff preview (60%)
+
+        # --- Left Panel: Selective Files Checklist ---
+        left_panel = ctk.CTkFrame(
+            split_card,
             fg_color=self.COLOR_CARD_BG,
             corner_radius=10,
             border_width=1,
             border_color=self.COLOR_BORDER,
         )
-        diff_card.grid(row=1, column=0, sticky="nsew")
-        diff_card.grid_rowconfigure(0, weight=1)
-        diff_card.grid_columnconfigure(0, weight=1)
+        left_panel.grid(row=0, column=0, sticky="nsew", padx=(0, 6))
+        left_panel.grid_rowconfigure(1, weight=1)
+        left_panel.grid_columnconfigure(0, weight=1)
+
+        left_header = ctk.CTkFrame(left_panel, fg_color="transparent")
+        left_header.grid(row=0, column=0, sticky="ew", padx=10, pady=(8, 4))
+
+        self.file_count_label = ctk.CTkLabel(
+            left_header,
+            text="Changed Files (0)",
+            font=ctk.CTkFont(family=self.FONT_FAMILY, size=11, weight="bold"),
+        )
+        self.file_count_label.pack(side="left")
+
+        self.view_all_diff_btn = ctk.CTkButton(
+            left_header,
+            text="Show All Diff",
+            width=80,
+            height=22,
+            corner_radius=5,
+            font=ctk.CTkFont(family=self.FONT_FAMILY, size=10),
+            fg_color=("gray75", "#2C313C"),
+            hover_color=("gray65", "#3A4150"),
+            text_color=("gray10", "gray95"),
+            command=lambda: self._select_file_for_diff(None),
+        )
+        self.view_all_diff_btn.pack(side="right")
+
+        # Scrollable file list container
+        self.file_checklist_frame = ctk.CTkScrollableFrame(
+            left_panel,
+            fg_color="transparent",
+            corner_radius=0,
+        )
+        self.file_checklist_frame.grid(row=1, column=0, sticky="nsew", padx=4, pady=4)
+
+        # --- Right Panel: Diff Preview ---
+        right_panel = ctk.CTkFrame(
+            split_card,
+            fg_color=self.COLOR_CARD_BG,
+            corner_radius=10,
+            border_width=1,
+            border_color=self.COLOR_BORDER,
+        )
+        right_panel.grid(row=0, column=1, sticky="nsew", padx=(6, 0))
+        right_panel.grid_rowconfigure(1, weight=1)
+        right_panel.grid_columnconfigure(0, weight=1)
+
+        right_header = ctk.CTkFrame(right_panel, fg_color="transparent")
+        right_header.grid(row=0, column=0, sticky="ew", padx=10, pady=(8, 4))
+
+        self.diff_preview_title = ctk.CTkLabel(
+            right_header,
+            text="Diff Preview: All Staged Changes",
+            font=ctk.CTkFont(family=self.FONT_FAMILY, size=11, weight="bold"),
+        )
+        self.diff_preview_title.pack(side="left")
 
         self.diff_textbox = ctk.CTkTextbox(
-            diff_card,
+            right_panel,
             corner_radius=6,
             font=ctk.CTkFont(family=self.MONO_FONT, size=11),
             wrap="none",
         )
-        self.diff_textbox.grid(row=0, column=0, sticky="nsew", padx=10, pady=10)
+        self.diff_textbox.grid(row=1, column=0, sticky="nsew", padx=8, pady=(0, 8))
         self.diff_textbox.insert("1.0", "Select a repository to view Git diff and staged changes.")
 
         return view
@@ -738,40 +840,151 @@ class App(ctk.CTk):
         if not self.project_path:
             self.diff_textbox.delete("1.0", "end")
             self.diff_textbox.insert("1.0", "No Git repository selected.")
+            self._render_file_checklist([])
             return
 
-        git_diff = GitService.get_staged_diff(self.project_path)
-        status_summary = GitService.get_repo_status_summary(self.project_path)
+        # Fetch detailed file status
+        files_status = GitService.get_detailed_file_status(self.project_path)
+        self._render_file_checklist(files_status)
 
-        lines = []
-        lines.append(f"# Repository: {Path(self.project_path).name}")
-        lines.append(f"# Active Branch: {status_summary.get('branch', 'unknown')}")
-        lines.append(f"# Unpushed Commits: {status_summary.get('unpushed_count', 0)}\n")
+        # Update diff text
+        self._update_diff_textbox()
 
-        lines.append("## Staged Files (will be analyzed for commit):")
-        staged = status_summary.get("staged_files", [])
-        if staged:
-            for s in staged:
-                lines.append(f"  [{s['status']}] {s['file']}")
+    def _render_file_checklist(self, files_status: List[Dict]):
+        for widget in self.file_checklist_frame.winfo_children():
+            widget.destroy()
+
+        self.file_count_label.configure(text=f"Changed Files ({len(files_status)})")
+
+        if not files_status:
+            no_files_lbl = ctk.CTkLabel(
+                self.file_checklist_frame,
+                text="Working tree is clean.\nNo modified or untracked files.",
+                font=ctk.CTkFont(family=self.FONT_FAMILY, size=11),
+                text_color=self.COLOR_TEXT_MUTED,
+                justify="center",
+            )
+            no_files_lbl.pack(pady=30)
+            return
+
+        for item in files_status:
+            file_path = item["file"]
+            is_staged = item["staged"]
+            status_type = item["status_type"]
+
+            row_frame = ctk.CTkFrame(
+                self.file_checklist_frame,
+                fg_color=self.COLOR_INNER_BG if file_path == self.selected_diff_file else "transparent",
+                corner_radius=6,
+            )
+            row_frame.pack(fill="x", pady=2, padx=2)
+
+            var = ctk.BooleanVar(value=is_staged)
+            cb = ctk.CTkCheckBox(
+                row_frame,
+                text="",
+                variable=var,
+                width=20,
+                height=20,
+                command=lambda fp=file_path, v=var: self._on_file_checkbox_toggle(fp, v),
+            )
+            cb.pack(side="left", padx=(6, 4))
+
+            # Status Badge color
+            badge_color = "#3B82F6"
+            badge_char = item.get("index_status", "") or item.get("work_status", "M")
+            if "Added" in status_type or "Untracked" in status_type:
+                badge_color = self.COLOR_SUCCESS[1]
+                badge_char = "A" if "Added" in status_type else "?"
+            elif "Deleted" in status_type:
+                badge_color = self.COLOR_DANGER[1]
+                badge_char = "D"
+            elif "Modified" in status_type:
+                badge_color = "#F59E0B"
+                badge_char = "M"
+
+            tag_lbl = ctk.CTkLabel(
+                row_frame,
+                text=f"[{badge_char}]",
+                font=ctk.CTkFont(family=self.MONO_FONT, size=10, weight="bold"),
+                text_color=badge_color,
+                width=24,
+            )
+            tag_lbl.pack(side="left")
+
+            # Clickable file label to view diff
+            file_btn = ctk.CTkButton(
+                row_frame,
+                text=file_path,
+                anchor="w",
+                height=24,
+                fg_color="transparent",
+                hover_color=("gray80", "#2C313C"),
+                text_color=("gray15", "gray90"),
+                font=ctk.CTkFont(family=self.FONT_FAMILY, size=10),
+                command=lambda fp=file_path: self._select_file_for_diff(fp),
+            )
+            file_btn.pack(side="left", fill="x", expand=True, padx=(2, 6))
+
+    def _on_file_checkbox_toggle(self, file_path: str, var: ctk.BooleanVar):
+        if not self.project_path:
+            return
+
+        should_stage = var.get()
+        if should_stage:
+            GitService.stage_single_file(file_path, self.project_path)
+            self.status_label.configure(text=f"✓ Staged: {file_path}", text_color=self.COLOR_SUCCESS[1])
         else:
-            lines.append("  (No staged files - click '+ Stage All' or run 'git add')")
+            GitService.unstage_single_file(file_path, self.project_path)
+            self.status_label.configure(text=f"✓ Unstaged: {file_path}", text_color=self.COLOR_TEXT_MUTED)
 
-        lines.append("\n## Unstaged Changes:")
-        unstaged = status_summary.get("unstaged_files", [])
-        if unstaged:
-            for u in unstaged:
-                lines.append(f"  [{u['status']}] {u['file']}")
-        else:
-            lines.append("  (None)")
+        self.refresh_git_status()
+        self._update_diff_textbox()
 
-        lines.append("\n" + "=" * 60 + "\n## Staged Diff Preview:\n" + "=" * 60 + "\n")
-        if git_diff and git_diff.diff:
-            lines.append(git_diff.diff)
+    def _select_file_for_diff(self, file_path: Optional[str]):
+        self.selected_diff_file = file_path
+        self._update_diff_textbox()
+        if self.current_view == "Diff":
+            # Re-render file list to update row selection highlight
+            files_status = GitService.get_detailed_file_status(self.project_path)
+            self._render_file_checklist(files_status)
+
+    def _update_diff_textbox(self):
+        if not self.project_path:
+            return
+
+        if self.selected_diff_file:
+            self.diff_preview_title.configure(text=f"Diff Preview: {self.selected_diff_file}")
+            diff_text = GitService.get_file_diff(self.selected_diff_file, self.project_path)
+            if not diff_text.strip():
+                diff_text = f"# No diff changes found for {self.selected_diff_file}."
         else:
-            lines.append("No staged diff content available.")
+            self.diff_preview_title.configure(text="Diff Preview: All Staged Changes")
+            git_diff = GitService.get_staged_diff(self.project_path)
+            status_summary = GitService.get_repo_status_summary(self.project_path)
+
+            lines = []
+            lines.append(f"# Repository: {Path(self.project_path).name}")
+            lines.append(f"# Active Branch: {status_summary.get('branch', 'unknown')}")
+            lines.append(f"# Unpushed Commits: {status_summary.get('unpushed_count', 0)}\n")
+
+            lines.append("## Staged Files (will be analyzed for commit):")
+            staged = status_summary.get("staged_files", [])
+            if staged:
+                for s in staged:
+                    lines.append(f"  [{s['status']}] {s['file']}")
+            else:
+                lines.append("  (No staged files - check boxes or click '+ Stage All')")
+
+            lines.append("\n" + "=" * 60 + "\n## Staged Unified Diff Preview:\n" + "=" * 60 + "\n")
+            if git_diff and git_diff.diff:
+                lines.append(git_diff.diff)
+            else:
+                lines.append("No staged diff content available.")
+            diff_text = "\n".join(lines)
 
         self.diff_textbox.delete("1.0", "end")
-        self.diff_textbox.insert("1.0", "\n".join(lines))
+        self.diff_textbox.insert("1.0", diff_text)
 
     # -------------------------------------------------------------------------
     # 3. Settings View
@@ -1408,6 +1621,42 @@ class App(ctk.CTk):
                 "Commit Failed",
                 "Failed to create the commit. Please ensure there are staged changes and try again.",
             )
+
+    # -------------------------------------------------------------------------
+    # Pull Execution
+    # -------------------------------------------------------------------------
+    def pull_commits_async(self):
+        project = (self.project_entry.get() or "").strip() or self.project_path
+        if not project:
+            messagebox.showwarning("Project Required", "Please select a project folder.")
+            return
+
+        self.status_label.configure(text="⏳ Pulling latest changes from remote...", text_color=self.COLOR_TEAL[1])
+        self.pull_button.configure(state="disabled", text="⏳ Pulling...")
+        self.top_pull_btn.configure(state="disabled")
+
+        def _worker():
+            success, msg = GitService.pull_commits(project)
+            self.after(0, lambda: self._on_pull_complete(success, msg))
+
+        threading.Thread(target=_worker, daemon=True).start()
+
+    def _on_pull_complete(self, success: bool, msg: str):
+        self.pull_button.configure(state="normal", text="📥 Pull")
+        self.top_pull_btn.configure(state="normal")
+        self.refresh_git_status()
+        if self.current_view == "Diff":
+            self._refresh_diff_view()
+
+        if success:
+            self.status_label.configure(
+                text="✓ Pull completed successfully!",
+                text_color=self.COLOR_SUCCESS[1],
+            )
+            messagebox.showinfo("Pull Success", f"Successfully pulled from remote:\n\n{msg}")
+        else:
+            self.status_label.configure(text="❌ Pull failed", text_color=self.COLOR_DANGER[1])
+            messagebox.showerror("Pull Failed", f"Failed to pull from remote:\n\n{msg}")
 
     # -------------------------------------------------------------------------
     # Push Execution

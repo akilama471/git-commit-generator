@@ -434,6 +434,117 @@ class GitService:
         except Exception as e:
             return False, str(e)
 
+    @staticmethod
+    def pull_commits(repo_path: Optional[str] = None, remote: str = "origin", branch: Optional[str] = None) -> Tuple[bool, str]:
+        """Pull latest changes from the remote repository."""
+        try:
+            root = GitService.get_repository_root(repo_path)
+            if not root:
+                return False, "Not a valid git repository."
+
+            curr_branch = GitService.get_current_branch(root)
+            cmd = ["git", "pull"]
+            if remote and branch:
+                cmd.extend([remote, branch])
+            elif remote and curr_branch and curr_branch != "unknown":
+                cmd.extend([remote, curr_branch])
+
+            stdout, stderr, code = GitService.run_git_command(cmd, cwd=root)
+            if code == 0:
+                msg = stdout.strip() or stderr.strip() or "Already up to date."
+                return True, msg
+            else:
+                err = stderr.strip() or stdout.strip() or "Pull failed."
+                return False, err
+        except Exception as e:
+            return False, str(e)
+
+    @staticmethod
+    def stage_single_file(file_path: str, repo_path: Optional[str] = None) -> bool:
+        """Stage a single file."""
+        try:
+            root = GitService.get_repository_root(repo_path)
+            if not root:
+                return False
+            _, _, code = GitService.run_git_command(["git", "add", "--", file_path], cwd=root)
+            return code == 0
+        except Exception:
+            return False
+
+    @staticmethod
+    def unstage_single_file(file_path: str, repo_path: Optional[str] = None) -> bool:
+        """Unstage a single file."""
+        try:
+            root = GitService.get_repository_root(repo_path)
+            if not root:
+                return False
+            _, _, code = GitService.run_git_command(["git", "restore", "--staged", "--", file_path], cwd=root)
+            if code != 0:
+                _, _, code = GitService.run_git_command(["git", "reset", "HEAD", "--", file_path], cwd=root)
+            return code == 0
+        except Exception:
+            return False
+
+    @staticmethod
+    def get_file_diff(file_path: str, repo_path: Optional[str] = None, staged_only: bool = False) -> str:
+        """Get diff for a specific single file."""
+        try:
+            root = GitService.get_repository_root(repo_path)
+            if not root:
+                return ""
+            if staged_only:
+                stdout, _, _ = GitService.run_git_command(["git", "diff", "--cached", "--", file_path], cwd=root)
+            else:
+                stdout, _, _ = GitService.run_git_command(["git", "diff", "HEAD", "--", file_path], cwd=root)
+                if not stdout.strip():
+                    stdout, _, _ = GitService.run_git_command(["git", "diff", "--", file_path], cwd=root)
+            return stdout
+        except Exception:
+            return ""
+
+    @staticmethod
+    def get_detailed_file_status(repo_path: Optional[str] = None) -> List[Dict]:
+        """Get status of all changed and untracked files with staging state."""
+        results = []
+        try:
+            root = GitService.get_repository_root(repo_path)
+            if not root:
+                return results
+
+            stdout, _, code = GitService.run_git_command(["git", "status", "--porcelain", "-uall"], cwd=root)
+            if code != 0:
+                return results
+
+            for line in stdout.splitlines():
+                if len(line) >= 4:
+                    index_status = line[0]
+                    work_status = line[1]
+                    filename = line[3:].strip()
+                    if " -> " in filename:
+                        filename = filename.split(" -> ")[-1].strip()
+
+                    is_staged = index_status not in (" ", "?", "!")
+                    
+                    status_type = "Modified"
+                    if index_status == "A" or work_status == "A" or index_status == "?" or work_status == "?":
+                        status_type = "Untracked" if index_status == "?" else "Added"
+                    elif index_status == "D" or work_status == "D":
+                        status_type = "Deleted"
+                    elif index_status == "R" or work_status == "R":
+                        status_type = "Renamed"
+
+                    results.append({
+                        "file": filename,
+                        "staged": is_staged,
+                        "index_status": index_status,
+                        "work_status": work_status,
+                        "status_type": status_type,
+                    })
+        except Exception:
+            pass
+        return results
+
+
 
 def get_repo_info(repo_path: str) -> Dict:
     return GitService.get_repo_info(repo_path)
@@ -471,16 +582,24 @@ def unstage_all_changes(repo_path: Optional[str] = None) -> bool:
     return GitService.unstage_all_changes(repo_path)
 
 
-def commit_with_message(message: str, repo_path: str, commit_datetime: Optional[str] = None) -> bool:
-    return GitService.commit_with_message(message, repo_path, commit_datetime)
+def pull_commits(repo_path: Optional[str] = None, remote: str = "origin", branch: Optional[str] = None) -> Tuple[bool, str]:
+    return GitService.pull_commits(repo_path, remote, branch)
 
 
-def push_commits(repo_path: Optional[str] = None, remote: str = "origin", branch: Optional[str] = None) -> Tuple[bool, str]:
-    return GitService.push_commits(repo_path, remote, branch)
+def stage_single_file(file_path: str, repo_path: Optional[str] = None) -> bool:
+    return GitService.stage_single_file(file_path, repo_path)
 
 
-def get_unpushed_commits_count(repo_path: Optional[str] = None) -> int:
-    return GitService.get_unpushed_commits_count(repo_path)
+def unstage_single_file(file_path: str, repo_path: Optional[str] = None) -> bool:
+    return GitService.unstage_single_file(file_path, repo_path)
+
+
+def get_file_diff(file_path: str, repo_path: Optional[str] = None, staged_only: bool = False) -> str:
+    return GitService.get_file_diff(file_path, repo_path, staged_only)
+
+
+def get_detailed_file_status(repo_path: Optional[str] = None) -> List[Dict]:
+    return GitService.get_detailed_file_status(repo_path)
 
 
 def get_repository_root(repo_path: Optional[str] = None) -> Optional[str]:
@@ -493,6 +612,7 @@ def get_current_branch(repo_path: Optional[str] = None) -> str:
 
 def get_repo_status_summary(repo_path: Optional[str] = None) -> Dict:
     return GitService.get_repo_status_summary(repo_path)
+
 
 
 
