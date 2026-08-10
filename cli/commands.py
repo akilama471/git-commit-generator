@@ -15,9 +15,9 @@ if sys.platform == "win32":
     sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding="utf-8", errors="replace")
     sys.stderr = io.TextIOWrapper(sys.stderr.buffer, encoding="utf-8", errors="replace")
 
-from .ai_client import GeminiClient  # Or whichever client you're using
-from .config import create_default_config, get_config, save_api_key, save_model, save_github_token
-from .git_utils import (
+from ..core.services.ai_service import GeminiClient  # Or whichever client you're using
+from ..core.config.settings import create_default_config, get_config, save_api_key, save_model, save_github_token
+from ..core.services.git_service import (
     commit_with_message,
     get_repo_info,
     get_repository_root,
@@ -25,7 +25,7 @@ from .git_utils import (
     run_git_command,
     stage_all_changes,
 )
-from .utils import edit_text, print_colored, select_from_menu
+from ..core.utils.utils import edit_text, print_colored, select_from_menu
 
 # Initialize colorama for Windows
 init(autoreset=True)
@@ -64,9 +64,7 @@ def cli():
 @click.option(
     "--issue", "-i", is_flag=True, help="Generate an issue description"
 )
-def generate(
-    path: str, add: bool, commit: bool, model: Optional[str], copy: bool, readme: bool, issue: bool
-):
+def generate(path: str, add: bool, commit: bool, model: Optional[str], copy: bool, readme: bool, issue: bool):
     """Generate commit message for staged changes
 
     PATH can be:
@@ -201,7 +199,6 @@ def generate(
         os.chdir(original_dir)
         print_colored(f"\n📁 Returned to: {original_dir}", "cyan")
 
-
 def generate_issue_cmd(model: Optional[str] = None):
     """Generate a structured Issue"""
     print_colored("\n📋 Generating new Issue...", "cyan")
@@ -217,7 +214,7 @@ def generate_issue_cmd(model: Optional[str] = None):
 
         # Initialize AI client
         use_model = model or config.get("model", "gemini-2.0-flash-lite")
-        from .ai_client import GeminiClient as AIClient
+        from ..core.services.ai_service import GeminiClient as AIClient
 
         client = AIClient(
             api_key=config["api_key"],
@@ -246,9 +243,9 @@ def generate_issue_cmd(model: Optional[str] = None):
         print("  [s] Save to file (issue.md)")
         print("  [p] Publish directly to GitHub")
         print("  [n] Cancel")
-        
+
         choice = click.prompt(
-            "Select action", 
+            "Select action",
             type=click.Choice(['y', 'c', 's', 'p', 'n'], case_sensitive=False),
             default='c'
         ).lower()
@@ -256,9 +253,9 @@ def generate_issue_cmd(model: Optional[str] = None):
         if choice == 'n':
             print_colored("❌ Issue generation cancelled", "yellow")
             return
-            
+
         final_issue = issue_content
-        
+
         if choice == 'y':
             print_colored("\nOpening your default text editor to review/edit the Issue...", 'cyan')
             edited_text = click.edit(text=issue_content)
@@ -266,14 +263,14 @@ def generate_issue_cmd(model: Optional[str] = None):
                 final_issue = edited_text
             else:
                 print_colored("No changes made in editor.", "blue")
-                
+
             # Ask again what to do with the edited text
             print("\n💾 What now?")
             print("  [c] Copy to clipboard")
             print("  [s] Save to file (issue.md)")
             print("  [p] Publish directly to GitHub")
             second_choice = click.prompt(
-                "Select action", 
+                "Select action",
                 type=click.Choice(['c', 's', 'p'], case_sensitive=False),
                 default='c'
             ).lower()
@@ -293,7 +290,7 @@ def generate_issue_cmd(model: Optional[str] = None):
         print_colored(f"❌ Error generating issue: {e}", "red")
         import traceback
         traceback.print_exc()
-        
+
 def publish_issue_to_github(issue_md: str, config: dict):
     """Publish generated issue markdown directly to GitHub via API"""
     token = config.get("github_token", "")
@@ -304,7 +301,7 @@ def publish_issue_to_github(issue_md: str, config: dict):
         return
 
     # Extract owner and repo from remote
-    from .git_utils import run_git_command
+    from ..core.services.git_service import run_git_command
     stdout, _, code = run_git_command(["git", "config", "--get", "remote.origin.url"])
     if code != 0 or not stdout.strip():
         print_colored("❌ Could not get git remote 'origin' URL.", "red")
@@ -325,12 +322,26 @@ def publish_issue_to_github(issue_md: str, config: dict):
     lines = issue_md.split('\n')
     title = "New Issue"
     body = issue_md
-    
-    for i, line in enumerate(lines):
-        if line.strip():
-            title = line.lstrip('# *').strip()
-            # Remove the title line from the body
-            body = '\n'.join(lines[i+1:]).strip()
+
+    in_frontmatter = False
+    frontmatter = []
+
+    for line in lines:
+        if line.strip() == '---':
+            if not in_frontmatter:
+                in_frontmatter = True
+            else:
+                in_frontmatter = False
+                break
+            continue
+
+        if in_frontmatter:
+            frontmatter.append(line)
+
+    # Extract title from frontmatter
+    for line in frontmatter:
+        if line.startswith("title:"):
+            title = line.split("title:", 1)[1].strip().strip('"')
             break
 
     print_colored(f"Publishing issue '{title}' to {owner}/{repo}...", "blue")
@@ -359,7 +370,6 @@ def publish_issue_to_github(issue_md: str, config: dict):
         except:
             print(response.text)
 
-
 def generate_readme(repo_path: str, model: Optional[str] = None):
     """Generate README.md for the repository"""
 
@@ -375,7 +385,7 @@ def generate_readme(repo_path: str, model: Optional[str] = None):
         # Initialize AI client
         use_model = model or config.get("model", "gemini-2.0-flash-lite")
 
-        from .ai_client import GeminiClient as AIClient
+        from ..core.services.ai_service import GeminiClient as AIClient
 
         client = AIClient(
             api_key=config["api_key"],
@@ -403,9 +413,9 @@ def generate_readme(repo_path: str, model: Optional[str] = None):
         print("  [y] Edit before saving")
         print("  [s] Save directly (continue)")
         print("  [n] Cancel")
-        
+
         choice = click.prompt(
-            "Select action", 
+            "Select action",
             type=click.Choice(['y', 's', 'n'], case_sensitive=False),
             default='s'
         ).lower()
@@ -413,14 +423,14 @@ def generate_readme(repo_path: str, model: Optional[str] = None):
         if choice == 'n':
             print_colored("❌ README generation cancelled", "yellow")
             return
-            
+
         final_readme = readme_content
-        
+
         if choice == 'y':
             print_colored("\nOpening your default text editor to review/edit the README...", 'cyan')
             print_colored("Close the editor when you are finished. It will be saved automatically.", 'yellow')
             edited_text = click.edit(text=readme_content)
-            
+
             # click.edit returns None if closed without modification
             if edited_text is not None:
                 final_readme = edited_text
@@ -448,7 +458,6 @@ def generate_readme(repo_path: str, model: Optional[str] = None):
         import traceback
 
         traceback.print_exc()
-
 
 def generate_readme_content(client, repo_info: dict) -> str:
     """Generate README content using AI"""
@@ -492,7 +501,6 @@ Ensure all code examples are in the correct language based on the project's prim
     except Exception as e:
         print_colored(f"⚠️  AI generation failed, using template: {e}", "yellow")
         return generate_basic_readme(repo_info)
-
 
 def generate_basic_readme(repo_info: dict) -> str:
     """Generate a basic README template"""
@@ -680,7 +688,7 @@ def main():
     # This allows `git-commit-ai -c` to evaluate as `git-commit-ai generate -c`
     elif sys.argv[1] not in ["generate", "config", "status", "--help", "-h"]:
         sys.argv.insert(1, "generate")
-        
+
     cli()
 
 
