@@ -3,8 +3,7 @@ import json
 from typing import List, Optional
 
 class GeminiClient:
-    def __init__(self, api_key: str, model: str = "gemini-2.0-flash-lite",
-                 max_diff_len: int = 5000, temperature: float = 0.7):
+    def __init__(self, api_key: str, model: str = "gemini-2.0-flash-lite", max_diff_len: int = 5000, temperature: float = 0.7):
         self.api_key = api_key
         self.model = model  # gemini-2.0-flash-lite, gemini-2.0-flash, or gemini-1.5-pro
         self.max_diff_len = max_diff_len
@@ -13,7 +12,7 @@ class GeminiClient:
         self.base_url = "https://generativelanguage.googleapis.com/v1beta/models"
 
     def generate_commit_messages(self, diff: str) -> List[str]:
-        """Generate multiple commit message options using Gemini API"""
+        """Generate single commit message using Gemini API"""
 
         # Truncate diff if too long
         if len(diff) > self.max_diff_len:
@@ -72,21 +71,18 @@ CRITICAL OUTPUT FORMAT REQUIREMENTS:
         }
 
         try:
-            print(f"🔍 Sending request to Gemini with model: {self.model}")
+            #print(f"🔍 Sending request to Gemini with model: {self.model}")
             response = requests.post(url, headers=headers, json=data)
 
             # Check if request was successful
             if response.status_code != 200:
-                print(f"❌ API returned status {response.status_code}")
-                print(f"Response: {response.text}")
-                return []
+                return f"Response: {response.text}"
 
             result = response.json()
 
             # Check for API errors
             if 'error' in result:
-                print(f"❌ API Error: {result['error']['message']}")
-                return []
+                return f"❌ API Error: {result['error']['message']}"
 
             # Extract content from Gemini response
             content = None

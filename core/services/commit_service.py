@@ -1,118 +1,54 @@
+import os
+import sys
+from pathlib import Path
+from typing import Optional
+
+from core.services.git_service import GitService
+from core.config.config_manager import ConfigManager
+from core.services.ai_service import GeminiClient
 
 
 class CommitService:
-    
-    def generate(self):
+    def __init__(self, commit_generator):
+        self.commit_generator = commit_generator
 
-        project = self.project_entry.get().strip()
-        commit_date = self.date_entry.get().strip()
-        commit_time = self.time_entry.get().strip()
+    @staticmethod
+    def generate_commit_message(path: str, model: Optional[str]):
+        """Generate commit message for staged changes
 
-        if not project:
-            messagebox.showwarning(
-                "Project Required",
-                "Please select a project folder."
-            )
-            return
+        PATH can be:
+        - Current directory: .
+        - Relative path: ./my-project
+        - Absolute path: M:/Projects/my-project
+        """
 
-        try:
+        if not path:
+            return "Please select a project folder."
 
-            self.status_label.configure(
-                text="Generating commit..."
-            )
+        target_path = Path(path).resolve()
 
-            self.generate_button.configure(
-                state="disabled"
-            )
+        # Get staged diff
+        git_diff = GitService.get_staged_diff(str(target_path))
 
-            commit = generate(
-                project_path=project,
-                commit_date=commit_date or None,
-                commit_time=commit_time or None
-            )
+        if not git_diff or not git_diff.diff:
+            return "No staged changes found! Use --add to stage all changes or run 'git add' first"
 
-            self.commit_text.delete("1.0", "end")
-            self.commit_text.insert("1.0", commit)
+        # Load config
+        config = ConfigManager.get_config()
 
-            self.status_label.configure(
-                text="Commit generated"
+        # Initialize AI client
+        use_model = model or config.get("model", "gemini-2.0-flash-lite")
+        client = GeminiClient(
+            api_key=config["api_key"],
+            model=use_model,
+            max_diff_len=config["max_diff_length"],
+            temperature=config.get("temperature", 0.7),
+        )
 
-            )
+        # Generate messages
+        options = client.generate_commit_messages(git_diff.diff)
 
-        except Exception as e:
+        if not options:
+            return "Failed to generate commit messages"
 
-            messagebox.showerror(
-                "Generation Failed",
-                str(e)
-            )
-
-            self.status_label.configure(
-                text="Generation failed"
-            )
-
-        finally:
-
-            self.generate_button.configure(
-                state="normal"
-            )
-
-    def create_commit(self):
-
-        project = self.project_entry.get().strip()
-        commit_date = self.date_entry.get().strip()
-        commit_time = self.time_entry.get().strip()
-
-        message = self.commit_text.get(
-            "1.0",
-            "end"
-        ).strip()
-
-        if not project:
-            messagebox.showwarning(
-                "Project Required",
-                "Please select a project folder."
-            )
-            return
-
-        if not message:
-            messagebox.showwarning(
-                "Commit Required",
-                "Generate or enter a commit message first."
-            )
-            return
-
-        try:
-
-            self.status_label.configure(
-                text="Creating commit..."
-            )
-
-            self.create_button.configure(
-                state="disabled"
-            )
-
-            self.status_label.configure(
-                text="Commit created successfully"
-            )
-
-            messagebox.showinfo(
-                "Success",
-                "Git commit created successfully."
-            )
-
-        except Exception as e:
-
-            messagebox.showerror(
-                "Commit Failed",
-                str(e)
-            )
-
-            self.status_label.configure(
-                text="Commit failed"
-            )
-
-        finally:
-
-            self.create_button.configure(
-                state="normal"
-            )
+        return options[0]

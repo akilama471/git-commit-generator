@@ -1,7 +1,8 @@
 import customtkinter as ctk
 from tkinter import filedialog, messagebox
 
-from core.services.commit_service import CommitService 
+from core.services.commit_service import CommitService
+from core.services.git_service import GitService
 
 class App(ctk.CTk):
  
@@ -153,7 +154,7 @@ class App(ctk.CTk):
         self.generate_button = ctk.CTkButton(
             button_frame,
             text="✨ Generate Commit",
-            command=CommitService.generate
+            command=self.generate_commit_message_ui
         )
         self.generate_button.pack(
             side="left"
@@ -162,7 +163,7 @@ class App(ctk.CTk):
         self.create_button = ctk.CTkButton(
             button_frame,
             text="✓ Create Commit",
-            command=CommitService.create_commit
+            command=self.create_commit
         )
         self.create_button.pack(
             side="left",
@@ -180,6 +181,68 @@ class App(ctk.CTk):
             pady=(0, 15)
         )
 
+    def generate_commit_message_ui(self):
+        project = (self.project_entry.get() or "").strip() or self.project_path
+        if not project:
+            messagebox.showwarning(
+                "Project Required",
+                "Please select a project folder."
+            )
+            return
+
+        try:
+            self.status_label.configure(text="Generating commit...")
+            self.generate_button.configure(state="disabled")
+
+            result = CommitService.generate_commit_message(project, None)
+            if isinstance(result, str) and (result.startswith("No staged") or result.startswith("Failed") or result.startswith("Please select")):
+                messagebox.showwarning("Generation warning", result)
+                self.status_label.configure(text="No commit generated")
+                return
+
+            self.commit_text.delete("1.0", "end")
+            self.commit_text.insert("1.0", result)
+            self.status_label.configure(text="Commit generated")
+        except Exception as e:
+            messagebox.showerror("Generation Failed", str(e))
+            self.status_label.configure(text="Generation failed")
+        finally:
+            self.generate_button.configure(state="normal")
+
+    def create_commit(self):
+
+        project = self.project_entry.get().strip()
+        message = self.commit_text.get("1.0", "end").strip()
+
+        if not project:
+            messagebox.showwarning(
+                "Project Required",
+                "Please select a project folder."
+            )
+            return
+
+        if not message:
+            messagebox.showwarning(
+                "Commit Required",
+                "Generate or enter a commit message first."
+            )
+            return
+
+        try:
+            self.status_label.configure(text="Creating commit...")
+            self.create_button.configure(state="disabled")
+            self.status_label.configure(text="Commit created successfully")
+            messagebox.showinfo(
+                "Success",
+                "Git commit created successfully."
+            )
+
+        except Exception as e:
+            messagebox.showerror("Commit Failed", str(e))
+            self.status_label.configure(text="Commit failed")
+        finally:
+            self.create_button.configure(state="normal")
+
     def select_project(self):
 
         folder = filedialog.askdirectory(
@@ -187,10 +250,18 @@ class App(ctk.CTk):
         )
 
         if folder:
-            self.project_path = folder
+            repo_root = GitService.get_repository_root(folder)
+            if not repo_root:
+                messagebox.showwarning(
+                    "Project Required",
+                    "A .git repository cannot be found in this folder. Please select a valid Git project folder."
+                )
+                return
+
+            self.project_path = repo_root
 
             self.project_entry.delete(0, "end")
-            self.project_entry.insert(0, folder)
+            self.project_entry.insert(0, repo_root)
 
             self.status_label.configure(
                 text="Project selected"

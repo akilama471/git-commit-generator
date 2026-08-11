@@ -16,7 +16,7 @@ if sys.platform == "win32":
     sys.stderr = io.TextIOWrapper(sys.stderr.buffer, encoding="utf-8", errors="replace")
 
 from ..core.services.ai_service import GeminiClient  # Or whichever client you're using
-from ..core.config.settings import create_default_config, get_config, save_api_key, save_model, save_github_token
+from ..core.config.config_manager import create_default_config, get_config, save_api_key, save_model, save_github_token
 from ..core.services.git_service import (
     commit_with_message,
     get_repo_info,
