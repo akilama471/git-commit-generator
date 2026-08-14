@@ -1,3 +1,4 @@
+import datetime
 import os
 import subprocess
 import tempfile
@@ -251,10 +252,16 @@ class GitService:
             return False
 
     @staticmethod
-    def commit_with_message(message: str, repo_path: Optional[str] = None) -> bool:
+    def commit_with_message(message: str, repo_path: str, commit_datetime: Optional[str] = None) -> bool:
         """Commit with the given message"""
         temp_file = None
         try:
+            if commit_datetime is not None:
+                # Set the GIT_AUTHOR_DATE environment variable
+                os.environ["GIT_AUTHOR_DATE"] = commit_datetime
+                # Set the GIT_COMMITTER_DATE environment variable
+                os.environ["GIT_COMMITTER_DATE"] = commit_datetime
+
             with tempfile.NamedTemporaryFile(
                 mode="w", delete=False, suffix=".txt", encoding="utf-8"
             ) as f:
@@ -262,7 +269,13 @@ class GitService:
                 temp_file = f.name
 
             _, _, code = GitService.run_git_command(["git", "commit", "-F", temp_file], cwd=repo_path)
-            return code == 0
+
+            # Clear the environment variables
+            if commit_datetime is not None:
+                del os.environ["GIT_AUTHOR_DATE"]
+                del os.environ["GIT_COMMITTER_DATE"]
+
+            return True
         except Exception as e:
             print(f"❌ Commit failed: {e}")
             return False
@@ -320,8 +333,8 @@ def stage_all_changes(repo_path: Optional[str] = None) -> bool:
     return GitService.stage_all_changes(repo_path)
 
 
-def commit_with_message(message: str, repo_path: Optional[str] = None) -> bool:
-    return GitService.commit_with_message(message, repo_path)
+def commit_with_message(message: str, repo_path: str, commit_datetime: Optional[str] = None) -> bool:
+    return GitService.commit_with_message(message, repo_path, commit_datetime)
 
 
 def get_repository_root(repo_path: Optional[str] = None) -> Optional[str]:

@@ -34,7 +34,10 @@ class CommitService:
             return "No staged changes found! Use --add to stage all changes or run 'git add' first"
 
         # Load config
-        config = ConfigManager.get_config()
+        status_code, config = ConfigManager.get_config()
+
+        if status_code != 200:
+            return f"Error {status_code}: {config}"
 
         # Initialize AI client
         use_model = model or config.get("model", "gemini-2.0-flash-lite")
