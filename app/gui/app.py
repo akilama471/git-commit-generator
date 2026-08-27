@@ -421,7 +421,7 @@ class App(ctk.CTk):
         )
         commit_title_lbl.pack(side="left")
 
-        # Option switch pills container
+        # Option switch pills container (shown if multiple options exist)
         self.options_container = ctk.CTkFrame(editor_toolbar, fg_color="transparent")
         self.options_container.pack(side="left", padx=12)
 
@@ -1200,7 +1200,7 @@ class App(ctk.CTk):
             self._render_option_pills()
             self._on_text_change()
             self.status_label.configure(
-                text=f"✓ Generated {len(result)} option(s)",
+                text="✓ Commit generated",
                 text_color=self.COLOR_SUCCESS[1],
             )
         elif isinstance(result, str):

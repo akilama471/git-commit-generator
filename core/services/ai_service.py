@@ -12,29 +12,48 @@ class GeminiClient:
         self.base_url = "https://generativelanguage.googleapis.com/v1beta/models"
 
     def generate_commit_messages(self, diff: str) -> List[str]:
-        """Generate single commit message using Gemini API"""
+        """Generate a single high-quality conventional git commit message using Gemini API"""
 
         # Truncate diff if too long
         if len(diff) > self.max_diff_len:
             diff = diff[:self.max_diff_len] + "\n... (truncated)"
 
-        prompt = f"""Generate git commit messages for these code changes:
+        prompt = f"""You are an expert software developer and Git specialist.
+Analyze the following git diff and generate a single, high-quality, professional Git commit message following the Conventional Commits specification.
 
+GIT DIFF:
+```diff
 {diff}
+```
 
-Requirements:
-- Format: <type>(<scope>): <description>
-- Types: feat, fix, docs, style, refactor, perf, test, chore, build, ci
-- First line: max 72 characters
-- If needed, add blank line then bullet points for details
-- Focus on WHY the change was made
-- Use imperative mood ("add" not "added")
-- No line breaks in the first line
+CONVENTIONAL COMMITS SPECIFICATION:
+1. Format: <type>(<optional-scope>): <description>
+2. Types:
+   - feat: A new feature or capability
+   - fix: A bug fix
+   - refactor: Code refactoring without changing functionality or fixing bugs
+   - perf: Code change that improves performance
+   - docs: Documentation changes only
+   - style: Formatting, missing semicolons, whitespace (no logic changes)
+   - test: Adding or updating test cases
+   - build: Changes affecting build systems, dependencies, or packaging
+   - ci: CI/CD configuration files and automation scripts
+   - chore: Maintenance, tooling, or housekeeping tasks
+3. Scope: Specify the affected module or component in parentheses if appropriate (e.g., auth, ui, core, config, api, git).
+4. Subject line rules:
+   - Maximum 72 characters (aim for 50-60 characters for crisp readability).
+   - Use lowercase for the type and description.
+   - Use imperative present mood ("add feature", "fix bug", NOT "added", "fixes", "fixing").
+   - Do NOT end the subject line with a period.
+5. Body rules (include only when changes are non-trivial or multi-part):
+   - Leave exactly ONE blank line after the subject line.
+   - Use concise bullet points starting with `- ` explaining WHAT changed and WHY (not how).
+   - Wrap body lines at 72 characters.
 
-CRITICAL OUTPUT FORMAT REQUIREMENTS:
-- Generate EXACTLY 3 different commit message options.
-- Separate each option with exactly three dashes: '---'
-- Output strictly the commit messages and separators. DO NOT include any introductory greetings, markdown code blocks (like ```), or concluding conversational text.
+CRITICAL OUTPUT CONSTRAINTS:
+- Output ONLY the single commit message.
+- Do NOT include markdown code blocks (no ```).
+- Do NOT include introductory greetings, explanations, alternative options, or closing text.
 """
 
         # Gemini API request format
@@ -58,20 +77,19 @@ CRITICAL OUTPUT FORMAT REQUIREMENTS:
             "system_instruction": {
                 "parts": [
                     {
-                        "text": "You are a helpful assistant that generates excellent git commit messages following conventional commits format."
+                        "text": "You are an expert Git commit assistant. You generate concise, accurate, and professional conventional git commit messages based on diffs. You output strictly the single raw commit message with no conversational text or markdown code fences."
                     }
                 ]
             },
             "generationConfig": {
                 "temperature": self.temperature,
-                "maxOutputTokens": 500,
+                "maxOutputTokens": 600,
                 "topP": 0.95,
                 "topK": 40
             }
         }
 
         try:
-            #print(f"🔍 Sending request to Gemini with model: {self.model}")
             response = requests.post(url, headers=headers, json=data)
 
             # Check if request was successful
@@ -99,22 +117,22 @@ CRITICAL OUTPUT FORMAT REQUIREMENTS:
                 print(f"Raw response: {result}")
                 return []
 
-            # Split into options
-            options = []
-            if '---' in content:
-                options = [opt.strip() for opt in content.split('---') if opt.strip()]
-            else:
-                # If no separators, treat as single option
-                options = [content.strip()]
+            # Strip markdown code blocks if model returned them
+            content = content.strip()
+            if content.startswith("```"):
+                lines = content.splitlines()
+                if lines and lines[0].startswith("```"):
+                    lines = lines[1:]
+                if lines and lines[-1].startswith("```"):
+                    lines = lines[:-1]
+                content = "\n".join(lines).strip()
 
-            # Filter out any empty options
-            options = [opt for opt in options if opt]
-
-            if not options:
+            if not content:
                 print("❌ No valid commit messages generated")
                 return []
 
-            return options
+            return [content]
+
 
         except requests.exceptions.RequestException as e:
             print(f"❌ Network error: {e}")
