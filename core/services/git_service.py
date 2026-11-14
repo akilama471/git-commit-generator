@@ -465,12 +465,24 @@ class GitService:
             "unstaged_files": [],
             "untracked_files": [],
             "unpushed_count": 0,
+            "error": "",
         }
         if not repo_path:
             return summary
 
+        if not os.path.isdir(repo_path):
+            summary["error"] = "Folder does not exist"
+            return summary
+
         root = GitService.get_repository_root(repo_path)
         if not root:
+            _, stderr, _ = GitService.run_git_command(
+                ["git", "rev-parse", "--show-toplevel"], cwd=repo_path
+            )
+            if "dubious ownership" in stderr.lower():
+                summary["error"] = "Git dubious ownership (safe.directory required)"
+            else:
+                summary["error"] = "Not a valid Git repository"
             return summary
 
         summary["is_repo"] = True
@@ -666,6 +678,86 @@ class GitService:
         except Exception:
             pass
         return results
+
+    @staticmethod
+    def scan_for_repositories(parent_path: str, max_depth: int = 3) -> List[str]:
+        """Discover Git repositories under parent_path up to max_depth levels."""
+        found: List[str] = []
+        seen = set()
+        if not parent_path or not os.path.isdir(parent_path):
+            return found
+
+        skip_dirs = {
+            ".git",
+            "node_modules",
+            ".venv",
+            "venv",
+            "env",
+            "__pycache__",
+            "dist",
+            "build",
+            ".idea",
+            ".vscode",
+        }
+        base_path = os.path.abspath(parent_path)
+
+        try:
+            for root, dirs, files in os.walk(base_path):
+                if ".git" in dirs or ".git" in files:
+                    resolved = str(Path(root).resolve())
+                    key = os.path.normcase(resolved)
+                    if key not in seen:
+                        seen.add(key)
+                        found.append(resolved)
+                    dirs[:] = []
+                    continue
+
+                rel = os.path.relpath(root, base_path)
+                depth = 0 if rel == "." else len(rel.split(os.sep))
+                if depth >= max_depth:
+                    dirs[:] = []
+                else:
+                    dirs[:] = [d for d in dirs if d not in skip_dirs]
+        except Exception:
+            pass
+
+        return sorted(found, key=lambda p: (os.path.basename(p).lower(), p.lower()))
+
+    @staticmethod
+    def get_local_branches(repo_path: Optional[str] = None) -> List[str]:
+        """Return list of local branch names for the repository."""
+        try:
+            root = GitService.get_repository_root(repo_path)
+            if not root:
+                return []
+            stdout, _, code = GitService.run_git_command(
+                ["git", "branch", "--format=%(refname:short)"],
+                cwd=root,
+            )
+            if code != 0:
+                return []
+            return [line.strip() for line in stdout.splitlines() if line.strip()]
+        except Exception:
+            return []
+
+    @staticmethod
+    def checkout_branch(repo_path: str, branch_name: str) -> Tuple[bool, str]:
+        """Switch to the specified local branch."""
+        try:
+            root = GitService.get_repository_root(repo_path)
+            if not root:
+                return False, "Not a valid git repository."
+            stdout, stderr, code = GitService.run_git_command(
+                ["git", "checkout", branch_name],
+                cwd=root,
+                timeout=30,
+            )
+            msg = (stderr or stdout or "").strip()
+            if code == 0:
+                return True, msg or f"Switched to branch '{branch_name}'."
+            return False, msg or f"Failed to switch to branch '{branch_name}'."
+        except Exception as e:
+            return False, str(e)
 
 
 def get_repo_info(repo_path: str) -> Dict:

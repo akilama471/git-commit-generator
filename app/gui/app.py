@@ -1,4 +1,6 @@
+import os
 import threading
+import tkinter as tk
 from datetime import datetime
 from pathlib import Path
 from tkinter import filedialog, messagebox
@@ -42,8 +44,8 @@ class App(ctk.CTk):
         super().__init__()
 
         self.title("AI Git Commit Generator")
-        self.geometry("980x660")
-        self.minsize(900, 560)
+        self.geometry("1040x680")
+        self.minsize(920, 580)
 
         self.project_path: Optional[str] = None
         self.current_view: str = "Generator"
@@ -57,13 +59,19 @@ class App(ctk.CTk):
         self._status_req_id: int = 0
         self._diff_req_id: int = 0
         self._diff_text_req_id: int = 0
+        self._repos_view_req_id: int = 0
         self._latest_status_summary: Optional[Dict] = None
         self._file_row_widgets: Dict[str, ctk.CTkFrame] = {}
+        self._repo_row_widgets: Dict[str, ctk.CTkButton] = {}
+        self._repo_status_labels: Dict[str, ctk.CTkLabel] = {}
+        self._repo_display_map: Dict[str, str] = {}
+        self._is_closing: bool = False
 
         self.model_options = list(DEFAULT_MODELS)
 
         # Load initial config
         self._load_config_cache()
+        self.saved_repositories: List[str] = list(self.config_data.get("repositories", []))
 
         # Build UI layout
         self._build_ui()
@@ -83,16 +91,41 @@ class App(ctk.CTk):
         except Exception:
             self.config_data = {}
 
+    def _post_ui(self, callback):
+        """Schedule a UI callback on the main thread safely, ignoring shutdown races."""
+        if getattr(self, "_is_closing", False):
+            return
+
+        def _safe_run():
+            if not getattr(self, "_is_closing", False):
+                callback()
+
+        try:
+            self.after(0, _safe_run)
+        except (RuntimeError, tk.TclError):
+            pass
+
+    def destroy(self):
+        self._is_closing = True
+        super().destroy()
+
     def _auto_detect_current_directory(self):
         saved_path = (self.config_data.get("last_repo_path") or "").strip()
+        saved_repos = list(self.saved_repositories)
 
         def _worker():
             cwd = GitService.get_current_directory()
             repo_root = GitService.get_repository_root(cwd)
             if not repo_root and saved_path and Path(saved_path).exists():
                 repo_root = GitService.get_repository_root(saved_path)
+            if not repo_root:
+                for candidate in saved_repos:
+                    if Path(candidate).exists():
+                        repo_root = GitService.get_repository_root(candidate)
+                        if repo_root:
+                            break
             if repo_root:
-                self.after(0, lambda r=repo_root: self._set_project(r, save_last=False))
+                self._post_ui(lambda r=repo_root: self._set_project(r, save_last=False))
 
         threading.Thread(target=_worker, daemon=True).start()
 
@@ -100,6 +133,8 @@ class App(ctk.CTk):
         self.refresh_git_status()
         if self.current_view == "Diff" and self.project_path:
             self._refresh_diff_view()
+        elif self.current_view == "Repositories":
+            self._refresh_repositories_view()
 
     def _update_model_dropdown_options(self, models: List[str]):
         if models:
@@ -123,14 +158,15 @@ class App(ctk.CTk):
         # 1. Left Sidebar
         self.sidebar = ctk.CTkFrame(
             self,
-            width=200,
+            width=220,
             corner_radius=0,
             fg_color=("gray92", "#131519"),
             border_width=1,
             border_color=self.COLOR_BORDER,
         )
         self.sidebar.grid(row=0, column=0, sticky="nsew")
-        self.sidebar.grid_rowconfigure(5, weight=1)  # spacer
+        self.sidebar.grid_columnconfigure(0, weight=1)
+        self.sidebar.grid_rowconfigure(7, weight=1)  # repo switcher list expands
 
         # App Brand Header
         brand_frame = ctk.CTkFrame(self.sidebar, fg_color="transparent")
@@ -155,7 +191,7 @@ class App(ctk.CTk):
 
         brand_sub = ctk.CTkLabel(
             title_text_frame,
-            text="v1.3 • AI Generator",
+            text="v1.4 • Multi-Repo",
             font=ctk.CTkFont(family=self.FONT_FAMILY, size=10),
             text_color=self.COLOR_TEXT_MUTED,
         )
@@ -173,6 +209,7 @@ class App(ctk.CTk):
         nav_items = [
             ("Generator", "⚡  Generator"),
             ("Diff", "📁  Changes & Diff"),
+            ("Repositories", "🗂️  Repositories"),
             ("Settings", "⚙️  Settings"),
         ]
 
@@ -192,9 +229,41 @@ class App(ctk.CTk):
             btn.grid(row=idx, column=0, sticky="ew", padx=10, pady=3)
             self.nav_buttons[view_key] = btn
 
+        # Sidebar Quick Repositories Switcher
+        repos_header = ctk.CTkFrame(self.sidebar, fg_color="transparent")
+        repos_header.grid(row=6, column=0, sticky="ew", padx=12, pady=(12, 4))
+
+        ctk.CTkLabel(
+            repos_header,
+            text="REPOSITORIES",
+            font=ctk.CTkFont(family=self.FONT_FAMILY, size=10, weight="bold"),
+            text_color=self.COLOR_TEXT_MUTED,
+        ).pack(side="left")
+
+        ctk.CTkButton(
+            repos_header,
+            text="+ Add",
+            width=46,
+            height=22,
+            corner_radius=5,
+            font=ctk.CTkFont(family=self.FONT_FAMILY, size=10, weight="bold"),
+            fg_color=("gray80", "#232730"),
+            hover_color=("gray70", "#2E3440"),
+            text_color=("gray15", "gray90"),
+            command=self.select_project,
+        ).pack(side="right")
+
+        self.sidebar_repo_scroll = ctk.CTkScrollableFrame(
+            self.sidebar,
+            fg_color="transparent",
+            corner_radius=6,
+            height=130,
+        )
+        self.sidebar_repo_scroll.grid(row=7, column=0, sticky="nsew", padx=8, pady=(0, 6))
+
         # Bottom section in sidebar
         bottom_frame = ctk.CTkFrame(self.sidebar, fg_color="transparent")
-        bottom_frame.grid(row=6, column=0, sticky="sew", padx=12, pady=14)
+        bottom_frame.grid(row=8, column=0, sticky="sew", padx=12, pady=12)
 
         # Active Model Pill Badge in Left Navigation Panel
         model_pill_frame = ctk.CTkFrame(
@@ -212,7 +281,7 @@ class App(ctk.CTk):
             font=ctk.CTkFont(family=self.FONT_FAMILY, size=10, weight="bold"),
             text_color=("gray20", "#93C5FD"),
             anchor="w",
-            wraplength=170,
+            wraplength=185,
         )
         self.model_status_badge.pack(padx=8, pady=5, fill="x")
 
@@ -246,8 +315,12 @@ class App(ctk.CTk):
         self.views = {
             "Generator": self._build_generator_view(),
             "Diff": self._build_diff_view(),
+            "Repositories": self._build_repositories_view(),
             "Settings": self._build_settings_view(),
         }
+
+        self._render_sidebar_repos()
+        self._sync_repo_switcher_menu()
 
         # Show default view
         self.show_view("Generator")
@@ -276,6 +349,8 @@ class App(ctk.CTk):
 
         if view_name == "Diff" and self.project_path:
             self._refresh_diff_view()
+        elif view_name == "Repositories":
+            self._refresh_repositories_view()
 
     def _change_appearance_mode(self, mode: str):
         ctk.set_appearance_mode(mode.lower())
@@ -322,8 +397,8 @@ class App(ctk.CTk):
 
         self.browse_btn = ctk.CTkButton(
             actions_frame,
-            text="Browse",
-            width=62,
+            text="+ Add Repo",
+            width=82,
             height=30,
             corner_radius=6,
             font=ctk.CTkFont(family=self.FONT_FAMILY, size=11),
@@ -388,7 +463,12 @@ class App(ctk.CTk):
         self.badge_strip = ctk.CTkFrame(repo_card, fg_color="transparent")
         self.badge_strip.grid(row=1, column=0, columnspan=3, sticky="ew", padx=12, pady=(0, 8))
 
-        self.branch_badge = self._create_badge(self.badge_strip, "🌿 Branch: None", "#3B82F6")
+        self.branch_badge = self._create_badge(
+            self.badge_strip,
+            "🌿 Branch: None",
+            "#3B82F6",
+            on_click=self._open_branch_switcher_menu,
+        )
         self.branch_badge.pack(side="left", padx=(0, 6))
 
         self.staged_badge = self._create_badge(
@@ -410,13 +490,20 @@ class App(ctk.CTk):
         self.unpushed_badge = self._create_badge(self.badge_strip, "↑ 0 unpushed", "#6B7280")
         self.unpushed_badge.pack(side="left", padx=(0, 6))
 
-        self.repo_name_label = ctk.CTkLabel(
+        self.repo_switcher_menu = ctk.CTkOptionMenu(
             self.badge_strip,
-            text="",
-            font=ctk.CTkFont(family=self.FONT_FAMILY, size=10),
-            text_color=self.COLOR_TEXT_MUTED,
+            values=["No repositories"],
+            width=170,
+            height=24,
+            corner_radius=6,
+            font=ctk.CTkFont(family=self.FONT_FAMILY, size=10, weight="bold"),
+            fg_color=self.COLOR_INNER_BG,
+            button_color=("gray75", "#2C313C"),
+            button_hover_color=("gray65", "#3A4150"),
+            text_color=("gray15", "gray90"),
+            command=self._on_repo_switcher_select,
         )
-        self.repo_name_label.pack(side="right")
+        self.repo_switcher_menu.pack(side="right")
 
         # --- Middle Card: Commit Date & Options ---
         date_card = ctk.CTkFrame(
@@ -894,7 +981,7 @@ class App(ctk.CTk):
 
         def _worker():
             files_status = GitService.get_detailed_file_status(path)
-            self.after(0, lambda: self._on_diff_list_loaded(req_id, files_status))
+            self._post_ui(lambda: self._on_diff_list_loaded(req_id, files_status))
 
         threading.Thread(target=_worker, daemon=True).start()
         self._update_diff_textbox()
@@ -1007,7 +1094,7 @@ class App(ctk.CTk):
                 ok = GitService.stage_single_file(file_path, path)
             else:
                 ok = GitService.unstage_single_file(file_path, path)
-            self.after(0, lambda: self._on_file_stage_complete(file_path, should_stage, ok))
+            self._post_ui(lambda: self._on_file_stage_complete(file_path, should_stage, ok))
 
         threading.Thread(target=_worker, daemon=True).start()
 
@@ -1086,7 +1173,7 @@ class App(ctk.CTk):
                     + "\n\n... [Diff preview truncated at 40,000 chars for UI performance]"
                 )
 
-            self.after(0, lambda: self._apply_diff_textbox(req_id, diff_text))
+            self._post_ui(lambda: self._apply_diff_textbox(req_id, diff_text))
 
         threading.Thread(target=_worker, daemon=True).start()
 
@@ -1095,6 +1182,493 @@ class App(ctk.CTk):
             return
         self.diff_textbox.delete("1.0", "end")
         self.diff_textbox.insert("1.0", diff_text)
+
+    # -------------------------------------------------------------------------
+    # 3. Repositories Manager View & Multi-Repo Switcher Helpers
+    # -------------------------------------------------------------------------
+    def _build_repositories_view(self) -> ctk.CTkFrame:
+        view = ctk.CTkFrame(self.main_container, fg_color="transparent")
+        view.grid_rowconfigure(1, weight=1)
+        view.grid_columnconfigure(0, weight=1)
+
+        header_card = ctk.CTkFrame(
+            view,
+            fg_color=self.COLOR_CARD_BG,
+            corner_radius=10,
+            border_width=1,
+            border_color=self.COLOR_BORDER,
+        )
+        header_card.grid(row=0, column=0, sticky="ew", pady=(0, 8))
+
+        header_inner = ctk.CTkFrame(header_card, fg_color="transparent")
+        header_inner.pack(fill="x", padx=12, pady=8)
+
+        title_box = ctk.CTkFrame(header_inner, fg_color="transparent")
+        title_box.pack(side="left")
+
+        ctk.CTkLabel(
+            title_box,
+            text="🗂️ Repositories Manager",
+            font=ctk.CTkFont(family=self.FONT_FAMILY, size=13, weight="bold"),
+        ).pack(anchor="w")
+
+        ctk.CTkLabel(
+            title_box,
+            text="Add, scan, switch, pull, or push multiple Git repositories from one place",
+            font=ctk.CTkFont(family=self.FONT_FAMILY, size=10),
+            text_color=self.COLOR_TEXT_MUTED,
+        ).pack(anchor="w")
+
+        btn_box = ctk.CTkFrame(header_inner, fg_color="transparent")
+        btn_box.pack(side="right")
+
+        ctk.CTkButton(
+            btn_box,
+            text="+ Add Repository",
+            width=115,
+            height=30,
+            corner_radius=6,
+            font=ctk.CTkFont(family=self.FONT_FAMILY, size=11, weight="bold"),
+            fg_color=self.COLOR_PRIMARY,
+            hover_color=self.COLOR_PRIMARY_HOVER,
+            command=self.select_project,
+        ).pack(side="left", padx=3)
+
+        self.scan_repos_btn = ctk.CTkButton(
+            btn_box,
+            text="📂 Scan Folder",
+            width=105,
+            height=30,
+            corner_radius=6,
+            fg_color=("gray75", "#2C313C"),
+            hover_color=("gray65", "#3A4150"),
+            text_color=("gray10", "gray95"),
+            font=ctk.CTkFont(family=self.FONT_FAMILY, size=11),
+            command=self.scan_workspace_repos_ui,
+        )
+        self.scan_repos_btn.pack(side="left", padx=3)
+
+        ctk.CTkButton(
+            btn_box,
+            text="🔄 Refresh All",
+            width=95,
+            height=30,
+            corner_radius=6,
+            fg_color="transparent",
+            hover_color=("gray85", "#2C313C"),
+            text_color=("gray20", "gray85"),
+            font=ctk.CTkFont(family=self.FONT_FAMILY, size=11),
+            command=self._refresh_repositories_view,
+        ).pack(side="left", padx=3)
+
+        list_card = ctk.CTkFrame(
+            view,
+            fg_color=self.COLOR_CARD_BG,
+            corner_radius=10,
+            border_width=1,
+            border_color=self.COLOR_BORDER,
+        )
+        list_card.grid(row=1, column=0, sticky="nsew")
+        list_card.grid_rowconfigure(0, weight=1)
+        list_card.grid_columnconfigure(0, weight=1)
+
+        self.repos_list_frame = ctk.CTkScrollableFrame(
+            list_card,
+            fg_color="transparent",
+            corner_radius=6,
+        )
+        self.repos_list_frame.grid(row=0, column=0, sticky="nsew", padx=8, pady=8)
+
+        return view
+
+    def _render_sidebar_repos(self):
+        for widget in self.sidebar_repo_scroll.winfo_children():
+            widget.destroy()
+        self._repo_row_widgets.clear()
+
+        if not self.saved_repositories:
+            ctk.CTkLabel(
+                self.sidebar_repo_scroll,
+                text="No repos saved yet.\nClick '+ Add' above.",
+                font=ctk.CTkFont(family=self.FONT_FAMILY, size=10),
+                text_color=self.COLOR_TEXT_MUTED,
+                justify="left",
+            ).pack(anchor="w", padx=8, pady=6)
+            return
+
+        active_norm = os.path.normcase(self.project_path) if self.project_path else ""
+        for repo_path in self.saved_repositories:
+            is_active = os.path.normcase(repo_path) == active_norm
+            repo_name = Path(repo_path).name or repo_path
+            btn = ctk.CTkButton(
+                self.sidebar_repo_scroll,
+                text=f"{'● ' if is_active else '📦 '}{repo_name}",
+                anchor="w",
+                height=28,
+                corner_radius=6,
+                font=ctk.CTkFont(
+                    family=self.FONT_FAMILY,
+                    size=11,
+                    weight="bold" if is_active else "normal",
+                ),
+                fg_color=self.COLOR_INNER_BG if is_active else "transparent",
+                text_color=("#1D4ED8", "#93C5FD") if is_active else ("gray25", "gray80"),
+                hover_color=("gray85", "#1E222A"),
+                command=lambda rp=repo_path: self._set_project(rp),
+            )
+            btn.pack(fill="x", padx=2, pady=1)
+            self._repo_row_widgets[os.path.normcase(repo_path)] = btn
+
+    def _sync_repo_switcher_menu(self):
+        self._repo_display_map.clear()
+        if not self.saved_repositories:
+            self.repo_switcher_menu.configure(values=["No repositories"])
+            self.repo_switcher_menu.set("No repositories")
+            return
+
+        name_counts: Dict[str, int] = {}
+        for rp in self.saved_repositories:
+            name = Path(rp).name or rp
+            name_counts[name] = name_counts.get(name, 0) + 1
+
+        display_values: List[str] = []
+        active_display = ""
+        active_norm = os.path.normcase(self.project_path) if self.project_path else ""
+
+        for rp in self.saved_repositories:
+            p = Path(rp)
+            name = p.name or rp
+            if name_counts.get(name, 0) > 1 and p.parent.name:
+                label = f"{name} ({p.parent.name})"
+            else:
+                label = name
+            while label in self._repo_display_map:
+                label = f"{label} *"
+            self._repo_display_map[label] = rp
+            display_values.append(label)
+            if os.path.normcase(rp) == active_norm:
+                active_display = label
+
+        self.repo_switcher_menu.configure(values=display_values)
+        if active_display:
+            self.repo_switcher_menu.set(active_display)
+        elif display_values:
+            self.repo_switcher_menu.set(display_values[0])
+
+    def _on_repo_switcher_select(self, choice: str):
+        target_path = self._repo_display_map.get(choice)
+        if target_path and os.path.normcase(target_path) != os.path.normcase(self.project_path or ""):
+            self._set_project(target_path)
+
+    def _open_branch_switcher_menu(self):
+        if not self.project_path:
+            return
+        path = self.project_path
+        current_branch = (self._latest_status_summary or {}).get("branch", "")
+
+        def _worker():
+            branches = GitService.get_local_branches(path)
+            self._post_ui(lambda: self._show_branch_menu(path, branches, current_branch))
+
+        threading.Thread(target=_worker, daemon=True).start()
+
+    def _show_branch_menu(self, repo_path: str, branches: List[str], current_branch: str):
+        if not branches:
+            self.status_label.configure(text="⚠️ No local branches found", text_color=self.COLOR_TEXT_MUTED)
+            return
+
+        menu = tk.Menu(self, tearoff=0)
+        for branch in branches:
+            label = f"✓ {branch}" if branch == current_branch else f"   {branch}"
+            menu.add_command(
+                label=label,
+                command=lambda b=branch: self._checkout_branch_async(repo_path, b),
+            )
+
+        x = self.branch_badge.winfo_rootx()
+        y = self.branch_badge.winfo_rooty() + self.branch_badge.winfo_height() + 2
+        try:
+            menu.tk_popup(x, y)
+        finally:
+            menu.grab_release()
+
+    def _checkout_branch_async(self, repo_path: str, branch_name: str):
+        self.status_label.configure(text=f"⏳ Switching to branch '{branch_name}'...", text_color="#3B82F6")
+
+        def _worker():
+            ok, msg = GitService.checkout_branch(repo_path, branch_name)
+            self._post_ui(lambda: self._on_checkout_complete(ok, branch_name, msg))
+
+        threading.Thread(target=_worker, daemon=True).start()
+
+    def _on_checkout_complete(self, ok: bool, branch_name: str, msg: str):
+        if ok:
+            self.status_label.configure(text=f"✓ Switched to branch '{branch_name}'", text_color=self.COLOR_SUCCESS[1])
+            self.refresh_git_status()
+            if self.current_view == "Diff":
+                self._refresh_diff_view()
+        else:
+            self.status_label.configure(text="❌ Branch switch failed", text_color=self.COLOR_DANGER[1])
+            messagebox.showerror("Branch Checkout Failed", msg)
+
+    def _refresh_repositories_view(self):
+        self._render_repositories_cards()
+        if not self.saved_repositories:
+            return
+
+        self._repos_view_req_id += 1
+        req_id = self._repos_view_req_id
+        repos = list(self.saved_repositories)
+
+        def _worker():
+            from concurrent.futures import ThreadPoolExecutor
+
+            def _check_one(rp: str):
+                summary = GitService.get_repo_status_summary(rp)
+                self._post_ui(lambda p=rp, s=summary: self._update_repo_card_status(req_id, p, s))
+
+            with ThreadPoolExecutor(max_workers=4) as pool:
+                list(pool.map(_check_one, repos))
+
+        threading.Thread(target=_worker, daemon=True).start()
+
+    def _render_repositories_cards(self):
+        for widget in self.repos_list_frame.winfo_children():
+            widget.destroy()
+        self._repo_status_labels.clear()
+
+        if not self.saved_repositories:
+            ctk.CTkLabel(
+                self.repos_list_frame,
+                text="No repositories added yet.\nClick '+ Add Repository' or '📂 Scan Folder' to add multiple Git projects.",
+                font=ctk.CTkFont(family=self.FONT_FAMILY, size=12),
+                text_color=self.COLOR_TEXT_MUTED,
+                justify="center",
+            ).pack(pady=60)
+            return
+
+        active_norm = os.path.normcase(self.project_path) if self.project_path else ""
+        for repo_path in self.saved_repositories:
+            is_active = os.path.normcase(repo_path) == active_norm
+            card = ctk.CTkFrame(
+                self.repos_list_frame,
+                fg_color=self.COLOR_INNER_BG,
+                corner_radius=8,
+                border_width=1,
+                border_color=self.COLOR_PRIMARY if is_active else self.COLOR_BORDER,
+            )
+            card.pack(fill="x", padx=4, pady=4)
+
+            info_col = ctk.CTkFrame(card, fg_color="transparent")
+            info_col.pack(side="left", fill="x", expand=True, padx=12, pady=8)
+
+            top_line = ctk.CTkFrame(info_col, fg_color="transparent")
+            top_line.pack(fill="x")
+
+            ctk.CTkLabel(
+                top_line,
+                text=f"📦 {Path(repo_path).name or repo_path}",
+                font=ctk.CTkFont(family=self.FONT_FAMILY, size=12, weight="bold"),
+                anchor="w",
+            ).pack(side="left")
+
+            if is_active:
+                ctk.CTkLabel(
+                    top_line,
+                    text="ACTIVE",
+                    font=ctk.CTkFont(family=self.FONT_FAMILY, size=9, weight="bold"),
+                    fg_color=self.COLOR_SUCCESS,
+                    text_color="#FFFFFF",
+                    corner_radius=4,
+                    padx=6,
+                    pady=1,
+                ).pack(side="left", padx=8)
+
+            ctk.CTkLabel(
+                info_col,
+                text=repo_path,
+                font=ctk.CTkFont(family=self.MONO_FONT, size=10),
+                text_color=self.COLOR_TEXT_MUTED,
+                anchor="w",
+            ).pack(fill="x", pady=(1, 2))
+
+            status_lbl = ctk.CTkLabel(
+                info_col,
+                text="⏳ Checking repository status...",
+                font=ctk.CTkFont(family=self.FONT_FAMILY, size=10),
+                text_color=self.COLOR_TEXT_MUTED,
+                anchor="w",
+            )
+            status_lbl.pack(fill="x")
+            self._repo_status_labels[os.path.normcase(repo_path)] = status_lbl
+
+            actions_col = ctk.CTkFrame(card, fg_color="transparent")
+            actions_col.pack(side="right", padx=10, pady=8)
+
+            ctk.CTkButton(
+                actions_col,
+                text="Open",
+                width=60,
+                height=28,
+                corner_radius=6,
+                font=ctk.CTkFont(family=self.FONT_FAMILY, size=11, weight="bold"),
+                fg_color=self.COLOR_PRIMARY,
+                hover_color=self.COLOR_PRIMARY_HOVER,
+                command=lambda rp=repo_path: self._open_repo_from_manager(rp),
+            ).pack(side="left", padx=2)
+
+            ctk.CTkButton(
+                actions_col,
+                text="📥 Pull",
+                width=60,
+                height=28,
+                corner_radius=6,
+                font=ctk.CTkFont(family=self.FONT_FAMILY, size=10, weight="bold"),
+                fg_color=self.COLOR_TEAL,
+                hover_color=self.COLOR_TEAL_HOVER,
+                command=lambda rp=repo_path: self._pull_repo_from_manager(rp),
+            ).pack(side="left", padx=2)
+
+            ctk.CTkButton(
+                actions_col,
+                text="🚀 Push",
+                width=60,
+                height=28,
+                corner_radius=6,
+                font=ctk.CTkFont(family=self.FONT_FAMILY, size=10, weight="bold"),
+                fg_color=self.COLOR_PURPLE,
+                hover_color=self.COLOR_PURPLE_HOVER,
+                command=lambda rp=repo_path: self._push_repo_from_manager(rp),
+            ).pack(side="left", padx=2)
+
+            ctk.CTkButton(
+                actions_col,
+                text="✕",
+                width=28,
+                height=28,
+                corner_radius=6,
+                fg_color="transparent",
+                hover_color=("#FEE2E2", "#3B1D1D"),
+                text_color=self.COLOR_DANGER,
+                font=ctk.CTkFont(family=self.FONT_FAMILY, size=11, weight="bold"),
+                command=lambda rp=repo_path: self._remove_repository(rp),
+            ).pack(side="left", padx=(4, 0))
+
+    def _update_repo_card_status(self, req_id: int, repo_path: str, summary: Dict):
+        if req_id != self._repos_view_req_id:
+            return
+        lbl = self._repo_status_labels.get(os.path.normcase(repo_path))
+        if not lbl or not lbl.winfo_exists():
+            return
+
+        if not summary.get("is_repo"):
+            err = summary.get("error") or "Invalid Git repository"
+            lbl.configure(text=f"⚠️ {err}", text_color=self.COLOR_DANGER[1])
+            return
+
+        branch = summary.get("branch", "unknown")
+        staged = len(summary.get("staged_files", []))
+        unstaged = len(summary.get("unstaged_files", [])) + len(summary.get("untracked_files", []))
+        unpushed = summary.get("unpushed_count", 0)
+        parts = [f"🌿 {branch}", f"● {staged} staged", f"● {unstaged} unstaged"]
+        if unpushed > 0:
+            parts.append(f"↑ {unpushed} unpushed")
+        color = self.COLOR_SUCCESS[1] if staged > 0 else ("#F59E0B" if unstaged > 0 else self.COLOR_TEXT_MUTED)
+        lbl.configure(text="   •   ".join(parts), text_color=color)
+
+    def _open_repo_from_manager(self, repo_path: str):
+        self._set_project(repo_path)
+        self.show_view("Generator")
+
+    def _pull_repo_from_manager(self, repo_path: str):
+        self.status_label.configure(text=f"⏳ Pulling {Path(repo_path).name}...", text_color=self.COLOR_TEAL[1])
+
+        def _worker():
+            ok, msg = GitService.pull_commits(repo_path)
+            self._post_ui(lambda: self._on_manager_git_action_complete("Pull", repo_path, ok, msg))
+
+        threading.Thread(target=_worker, daemon=True).start()
+
+    def _push_repo_from_manager(self, repo_path: str):
+        self.status_label.configure(text=f"⏳ Pushing {Path(repo_path).name}...", text_color=self.COLOR_PURPLE[1])
+
+        def _worker():
+            ok, msg = GitService.push_commits(repo_path)
+            self._post_ui(lambda: self._on_manager_git_action_complete("Push", repo_path, ok, msg))
+
+        threading.Thread(target=_worker, daemon=True).start()
+
+    def _on_manager_git_action_complete(self, action: str, repo_path: str, ok: bool, msg: str):
+        name = Path(repo_path).name
+        if ok:
+            self.status_label.configure(text=f"✓ {action} complete ({name})", text_color=self.COLOR_SUCCESS[1])
+        else:
+            self.status_label.configure(text=f"❌ {action} failed ({name})", text_color=self.COLOR_DANGER[1])
+            messagebox.showerror(f"{action} Failed ({name})", msg)
+        if os.path.normcase(repo_path) == os.path.normcase(self.project_path or ""):
+            self.refresh_git_status()
+        if self.current_view == "Repositories":
+            self._refresh_repositories_view()
+
+    def _remove_repository(self, repo_path: str):
+        self.saved_repositories = ConfigManager.remove_repository(repo_path)
+        if self.project_path and os.path.normcase(self.project_path) == os.path.normcase(repo_path):
+            self.project_path = None
+            self.project_entry.delete(0, "end")
+            if self.saved_repositories:
+                self._set_project(self.saved_repositories[0], save_last=False)
+            else:
+                self._set_badge_text(self.branch_badge, "🌿 Branch: None", "#3B82F6")
+                self._set_badge_text(self.staged_badge, "● 0 staged", "#6B7280")
+                self._set_badge_text(self.unstaged_badge, "● 0 modified", "#6B7280")
+                self._set_badge_text(self.unpushed_badge, "↑ 0 unpushed", "#6B7280")
+        self._render_sidebar_repos()
+        self._sync_repo_switcher_menu()
+        if self.current_view == "Repositories":
+            self._refresh_repositories_view()
+
+    def scan_workspace_repos_ui(self):
+        folder = filedialog.askdirectory(title="Select Parent Workspace Folder to Scan for Git Repositories")
+        if not folder:
+            return
+        self.scan_repos_btn.configure(state="disabled", text="⏳ Scanning...")
+        self.status_label.configure(text=f"⏳ Scanning {folder} for Git repositories...", text_color="#3B82F6")
+
+        def _worker():
+            discovered = GitService.scan_for_repositories(folder, max_depth=3)
+            self._post_ui(lambda: self._on_workspace_scanned(discovered))
+
+        threading.Thread(target=_worker, daemon=True).start()
+
+    def _on_workspace_scanned(self, discovered: List[str]):
+        self.scan_repos_btn.configure(state="normal", text="📂 Scan Folder")
+        if not discovered:
+            self.status_label.configure(text="⚠️ No Git repositories found in folder", text_color=self.COLOR_TEXT_MUTED)
+            messagebox.showinfo("Scan Complete", "No Git repositories were found within 3 directory levels.")
+            return
+
+        existing_keys = {os.path.normcase(r) for r in self.saved_repositories}
+        added_count = 0
+        for repo in discovered:
+            if os.path.normcase(repo) not in existing_keys:
+                self.saved_repositories.append(repo)
+                existing_keys.add(os.path.normcase(repo))
+                added_count += 1
+
+        self.saved_repositories = ConfigManager._dedupe_repositories(self.saved_repositories)
+        ConfigManager.save_settings({"repositories": self.saved_repositories})
+
+        self._render_sidebar_repos()
+        self._sync_repo_switcher_menu()
+        if not self.project_path and self.saved_repositories:
+            self._set_project(self.saved_repositories[0])
+        elif self.current_view == "Repositories":
+            self._refresh_repositories_view()
+
+        self.status_label.configure(
+            text=f"✓ Found {len(discovered)} repo(s), added {added_count} new",
+            text_color=self.COLOR_SUCCESS[1],
+        )
 
     # -------------------------------------------------------------------------
     # 3. Settings View
@@ -1341,7 +1915,7 @@ class App(ctk.CTk):
 
         def _worker():
             models = GeminiClient.list_available_models(api_key)
-            self.after(0, lambda: self._on_models_fetched(models))
+            self._post_ui(lambda: self._on_models_fetched(models))
 
         threading.Thread(target=_worker, daemon=True).start()
 
@@ -1556,7 +2130,7 @@ class App(ctk.CTk):
 
         def _worker():
             repo_root = GitService.get_repository_root(folder)
-            self.after(0, lambda: self._on_project_validated(repo_root))
+            self._post_ui(lambda: self._on_project_validated(repo_root))
 
         threading.Thread(target=_worker, daemon=True).start()
 
@@ -1571,20 +2145,33 @@ class App(ctk.CTk):
         self._set_project(repo_root)
 
     def _set_project(self, repo_root: str, save_last: bool = True):
-        self.project_path = repo_root
+        norm_root = ConfigManager._normalize_repo_path(repo_root)
+        self.project_path = norm_root
         self.selected_diff_file = None
         self.project_entry.delete(0, "end")
-        self.project_entry.insert(0, repo_root)
-        self.repo_name_label.configure(text=Path(repo_root).name)
-        if save_last and repo_root != self.config_data.get("last_repo_path"):
-            self.config_data["last_repo_path"] = repo_root
+        self.project_entry.insert(0, norm_root)
+
+        norm_key = os.path.normcase(norm_root)
+        already_saved = any(os.path.normcase(r) == norm_key for r in self.saved_repositories)
+        if not already_saved:
+            self.saved_repositories.append(norm_root)
+            self.saved_repositories = ConfigManager._dedupe_repositories(self.saved_repositories)
+
+        self._render_sidebar_repos()
+        self._sync_repo_switcher_menu()
+
+        if save_last or not already_saved or norm_root != self.config_data.get("last_repo_path"):
+            self.config_data["last_repo_path"] = norm_root
             threading.Thread(
-                target=lambda: ConfigManager.save_settings({"last_repo_path": repo_root}),
+                target=lambda: ConfigManager.add_repository(norm_root),
                 daemon=True,
             ).start()
+
         self.refresh_git_status()
         if self.current_view == "Diff":
             self._refresh_diff_view()
+        elif self.current_view == "Repositories":
+            self._refresh_repositories_view()
 
     def refresh_git_status(self):
         path = (self.project_entry.get() or "").strip() or self.project_path
@@ -1596,7 +2183,7 @@ class App(ctk.CTk):
 
         def _worker():
             summary = GitService.get_repo_status_summary(path)
-            self.after(0, lambda: self._apply_git_status(req_id, summary))
+            self._post_ui(lambda: self._apply_git_status(req_id, summary))
 
         threading.Thread(target=_worker, daemon=True).start()
 
@@ -1657,7 +2244,7 @@ class App(ctk.CTk):
 
         def _worker():
             success = GitService.stage_all_changes(path)
-            self.after(0, lambda: self._on_stage_all_complete(success, staged=True))
+            self._post_ui(lambda: self._on_stage_all_complete(success, staged=True))
 
         threading.Thread(target=_worker, daemon=True).start()
 
@@ -1670,7 +2257,7 @@ class App(ctk.CTk):
 
         def _worker():
             success = GitService.unstage_all_changes(path)
-            self.after(0, lambda: self._on_stage_all_complete(success, staged=False))
+            self._post_ui(lambda: self._on_stage_all_complete(success, staged=False))
 
         threading.Thread(target=_worker, daemon=True).start()
 
@@ -1721,7 +2308,7 @@ class App(ctk.CTk):
             success, result = CommitService.generate_commit_options(
                 project, selected_model, auto_stage=auto_stage
             )
-            self.after(0, lambda: self._on_generation_complete(success, result))
+            self._post_ui(lambda: self._on_generation_complete(success, result))
 
         threading.Thread(target=_worker, daemon=True).start()
 
@@ -1782,7 +2369,7 @@ class App(ctk.CTk):
             success, details = GitService.commit_with_message_detailed(
                 message, project, commit_datetime
             )
-            self.after(0, lambda: self._on_commit_complete(success, details))
+            self._post_ui(lambda: self._on_commit_complete(success, details))
 
         threading.Thread(target=_worker, daemon=True).start()
 
@@ -1826,7 +2413,7 @@ class App(ctk.CTk):
 
         def _worker():
             success, msg = GitService.pull_commits(project)
-            self.after(0, lambda: self._on_pull_complete(success, msg))
+            self._post_ui(lambda: self._on_pull_complete(success, msg))
 
         threading.Thread(target=_worker, daemon=True).start()
 
@@ -1862,7 +2449,7 @@ class App(ctk.CTk):
 
         def _worker():
             success, msg = GitService.push_commits(project)
-            self.after(0, lambda: self._on_push_complete(success, msg))
+            self._post_ui(lambda: self._on_push_complete(success, msg))
 
         threading.Thread(target=_worker, daemon=True).start()
 
