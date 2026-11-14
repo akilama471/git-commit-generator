@@ -1,26 +1,144 @@
-import requests
 import json
-from typing import List, Optional
+from typing import List, Optional, Tuple, Union
+
+import requests
+
+
+DEFAULT_MODELS = [
+    "gemini-2.0-flash-lite",
+    "gemini-2.0-flash",
+    "gemini-2.5-flash",
+    "gemini-2.5-flash-lite",
+    "gemini-1.5-flash",
+]
+
 
 class GeminiClient:
-    def __init__(self, api_key: str, model: str = "gemini-2.0-flash-lite", max_diff_len: int = 5000, temperature: float = 0.7):
-        self.api_key = api_key
-        self.model = model  # gemini-2.0-flash-lite, gemini-2.0-flash, or gemini-1.5-pro
+    _session = requests.Session()
+
+    def __init__(
+        self,
+        api_key: str,
+        model: str = "gemini-2.0-flash-lite",
+        max_diff_len: int = 5000,
+        temperature: float = 0.7,
+        timeout: int = 25,
+    ):
+        self.api_key = (api_key or "").strip()
+        self.model = model
         self.max_diff_len = max_diff_len
         self.temperature = temperature
-        # Gemini API endpoint
+        self.timeout = timeout
         self.base_url = "https://generativelanguage.googleapis.com/v1beta/models"
 
-    def generate_commit_messages(self, diff: str) -> List[str]:
-        """Generate a single high-quality conventional git commit message using Gemini API"""
+    @staticmethod
+    def _strip_code_fences(content: str) -> str:
+        text = content.strip()
+        if text.startswith("```"):
+            lines = text.splitlines()
+            if lines and lines[0].startswith("```"):
+                lines = lines[1:]
+            if lines and lines[-1].strip().startswith("```"):
+                lines = lines[:-1]
+            text = "\n".join(lines).strip()
+        return text
 
-        # Truncate diff if too long
+    def _call_generate_content(
+        self,
+        prompt: str,
+        system_instruction: str,
+        max_output_tokens: int = 600,
+        timeout: Optional[int] = None,
+    ) -> Tuple[bool, str]:
+        """Execute a Gemini generateContent call with connection pooling and timeout."""
+        if not self.api_key or self.api_key == "your-api-key-here":
+            return False, "Gemini API key is not configured."
+
+        url = f"{self.base_url}/{self.model}:generateContent?key={self.api_key}"
+        headers = {"Content-Type": "application/json"}
+        data = {
+            "contents": [
+                {
+                    "parts": [{"text": prompt}],
+                    "role": "user",
+                }
+            ],
+            "system_instruction": {
+                "parts": [{"text": system_instruction}]
+            },
+            "generationConfig": {
+                "temperature": self.temperature,
+                "maxOutputTokens": max_output_tokens,
+                "topP": 0.95,
+                "topK": 40,
+            },
+        }
+
+        try:
+            response = self._session.post(
+                url,
+                headers=headers,
+                json=data,
+                timeout=timeout or self.timeout,
+            )
+
+            if response.status_code != 200:
+                err_msg = f"API Error (HTTP {response.status_code})"
+                try:
+                    err_json = response.json()
+                    if isinstance(err_json, dict) and "error" in err_json:
+                        err_msg = f"API Error ({response.status_code}): {err_json['error'].get('message', response.text)}"
+                except Exception:
+                    if response.text:
+                        err_msg = f"API Error ({response.status_code}): {response.text[:300]}"
+                return False, err_msg
+
+            result = response.json()
+            if "error" in result:
+                return False, f"API Error: {result['error'].get('message', 'Unknown error')}"
+
+            content = None
+            candidates = result.get("candidates") or []
+            if candidates:
+                parts = (candidates[0].get("content") or {}).get("parts") or []
+                if parts and "text" in parts[0]:
+                    content = parts[0]["text"]
+
+            if not content:
+                return False, "No content returned by Gemini API."
+
+            cleaned = self._strip_code_fences(content)
+            if not cleaned:
+                return False, "Generated response was empty."
+
+            return True, cleaned
+
+        except requests.exceptions.Timeout:
+            return False, f"Request timed out after {timeout or self.timeout}s. Check your internet connection or try a faster model."
+        except requests.exceptions.RequestException as e:
+            return False, f"Network error: {e}"
+        except json.JSONDecodeError:
+            return False, "Invalid JSON response from Gemini API."
+        except Exception as e:
+            return False, f"Unexpected error: {e}"
+
+    def generate_commit_messages_safe(
+        self, diff: str, files: Optional[List[str]] = None
+    ) -> Tuple[bool, Union[List[str], str]]:
+        """Generate a conventional commit message, returning (success, [message] | error_message)."""
         if len(diff) > self.max_diff_len:
-            diff = diff[:self.max_diff_len] + "\n... (truncated)"
+            diff = diff[: self.max_diff_len] + "\n... (truncated)"
+
+        files_section = ""
+        if files:
+            listed = "\n".join(f"- {f}" for f in files[:40])
+            if len(files) > 40:
+                listed += f"\n- ... and {len(files) - 40} more files"
+            files_section = f"\nCHANGED FILES ({len(files)}):\n{listed}\n"
 
         prompt = f"""You are an expert software developer and Git specialist.
-Analyze the following git diff and generate a single, high-quality, professional Git commit message following the Conventional Commits specification.
-
+Analyze the following staged files and git diff, and generate a single, high-quality, professional Git commit message following the Conventional Commits specification.
+{files_section}
 GIT DIFF:
 ```diff
 {diff}
@@ -55,118 +173,34 @@ CRITICAL OUTPUT CONSTRAINTS:
 - Do NOT include markdown code blocks (no ```).
 - Do NOT include introductory greetings, explanations, alternative options, or closing text.
 """
+        system_instruction = (
+            "You are an expert Git commit assistant. You generate concise, accurate, and professional "
+            "conventional git commit messages based on diffs. You output strictly the single raw commit "
+            "message with no conversational text or markdown code fences."
+        )
 
-        # Gemini API request format
-        url = f"{self.base_url}/{self.model}:generateContent?key={self.api_key}"
+        success, result = self._call_generate_content(prompt, system_instruction, max_output_tokens=600)
+        if not success:
+            return False, result
+        return True, [result]
 
-        headers = {
-            "Content-Type": "application/json"
-        }
-
-        data = {
-            "contents": [
-                {
-                    "parts": [
-                        {
-                            "text": prompt
-                        }
-                    ],
-                    "role": "user"
-                }
-            ],
-            "system_instruction": {
-                "parts": [
-                    {
-                        "text": "You are an expert Git commit assistant. You generate concise, accurate, and professional conventional git commit messages based on diffs. You output strictly the single raw commit message with no conversational text or markdown code fences."
-                    }
-                ]
-            },
-            "generationConfig": {
-                "temperature": self.temperature,
-                "maxOutputTokens": 600,
-                "topP": 0.95,
-                "topK": 40
-            }
-        }
-
-        try:
-            response = requests.post(url, headers=headers, json=data)
-
-            # Check if request was successful
-            if response.status_code != 200:
-                return f"Response: {response.text}"
-
-            result = response.json()
-
-            # Check for API errors
-            if 'error' in result:
-                return f"❌ API Error: {result['error']['message']}"
-
-            # Extract content from Gemini response
-            content = None
-            if 'candidates' in result and len(result['candidates']) > 0:
-                candidate = result['candidates'][0]
-                if 'content' in candidate and 'parts' in candidate['content']:
-                    parts = candidate['content']['parts']
-                    if len(parts) > 0 and 'text' in parts[0]:
-                        content = parts[0]['text']
-
-            # If no content found
-            if not content:
-                print("❌ No content in API response")
-                print(f"Raw response: {result}")
-                return []
-
-            # Strip markdown code blocks if model returned them
-            content = content.strip()
-            if content.startswith("```"):
-                lines = content.splitlines()
-                if lines and lines[0].startswith("```"):
-                    lines = lines[1:]
-                if lines and lines[-1].startswith("```"):
-                    lines = lines[:-1]
-                content = "\n".join(lines).strip()
-
-            if not content:
-                print("❌ No valid commit messages generated")
-                return []
-
-            return [content]
-
-
-        except requests.exceptions.RequestException as e:
-            print(f"❌ Network error: {e}")
-            if hasattr(e, 'response') and e.response:
-                print(f"Response details: {e.response.text}")
+    def generate_commit_messages(self, diff: str, files: Optional[List[str]] = None) -> List[str]:
+        """Generate commit message list; returns [] on error (logging error to stdout)."""
+        success, result = self.generate_commit_messages_safe(diff, files=files)
+        if not success:
+            print(f"❌ {result}")
             return []
-        except json.JSONDecodeError:
-            print("❌ Invalid JSON response from API")
-            return []
-        except Exception as e:
-            print(f"❌ Unexpected error: {e}")
-            import traceback
-            traceback.print_exc()
-            return []
+        return result if isinstance(result, list) else [str(result)]
 
     @staticmethod
     def list_available_models(api_key: Optional[str] = None) -> List[str]:
         """Fetch all available models that support generateContent from the Gemini API."""
-        default_models = [
-            "gemini-2.0-flash-lite",
-            "gemini-2.0-flash",
-            "gemini-2.0-flash-thinking-exp-01-21",
-            "gemini-2.0-pro-exp-02-05",
-            "gemini-1.5-flash",
-            "gemini-1.5-flash-8b",
-            "gemini-1.5-pro",
-            "gemini-exp-1206",
-        ]
         if not api_key or api_key.strip() in ("", "your-api-key-here"):
-            return default_models
+            return list(DEFAULT_MODELS)
 
         try:
             url = f"https://generativelanguage.googleapis.com/v1beta/models?key={api_key.strip()}"
-            response = requests.get(url, timeout=5)
+            response = GeminiClient._session.get(url, timeout=8)
             if response.status_code == 200:
                 data = response.json()
                 models = []
@@ -178,154 +212,47 @@ CRITICAL OUTPUT CONSTRAINTS:
                         if clean_name.startswith("gemini"):
                             models.append(clean_name)
                 if models:
-                    # Sort prioritizing 2.0 / flash models first
                     return sorted(
                         list(dict.fromkeys(models)),
-                        key=lambda x: (not "2.0" in x, not "flash" in x, x),
+                        key=lambda x: (
+                            "2.5" not in x and "2.0" not in x,
+                            "lite" not in x,
+                            "flash" not in x,
+                            x,
+                        ),
                     )
-            return default_models
+            return list(DEFAULT_MODELS)
         except Exception as e:
             print(f"⚠️ Could not fetch remote models: {e}")
-            return default_models
-
+            return list(DEFAULT_MODELS)
 
     def generate_readme(self, prompt: str) -> Optional[str]:
-        """Generate a complete README.md string using Gemini API"""
-        url = f"{self.base_url}/{self.model}:generateContent?key={self.api_key}"
-        headers = {"Content-Type": "application/json"}
-        data = {
-            "contents": [
-                {
-                    "parts": [{"text": prompt}],
-                    "role": "user"
-                }
-            ],
-            "system_instruction": {
-                "parts": [
-                    {
-                        "text": "You are an expert technical writer and developer. Generate a highly structured, accurate, and visually appealing README.md based on the provided project context. Output ONLY the raw markdown content without any prepended conversational text or ```markdown wrapper."
-                    }
-                ]
-            },
-            "generationConfig": {
-                "temperature": self.temperature,
-                "maxOutputTokens": 2000,
-                "topP": 0.95,
-                "topK": 40
-            }
-        }
-        
-        try:
-            print(f"🔍 Sending request to Gemini for README generation with model: {self.model}")
-            response = requests.post(url, headers=headers, json=data)
-            
-            if response.status_code != 200:
-                print(f"❌ API returned status {response.status_code}")
-                return None
-                
-            result = response.json()
-            
-            if 'error' in result:
-                print(f"❌ API Error: {result['error']['message']}")
-                return None
-                
-            content = None
-            if 'candidates' in result and len(result['candidates']) > 0:
-                candidate = result['candidates'][0]
-                if 'content' in candidate and 'parts' in candidate['content']:
-                    parts = candidate['content']['parts']
-                    if len(parts) > 0 and 'text' in parts[0]:
-                        content = parts[0]['text']
-                        
-            if not content:
-                print("❌ No content in API response")
-                return None
-                
-            # Strip markdown block wrappers if model still returns them
-            content = content.strip()
-            if content.startswith("```markdown"):
-                content = content[11:]
-            elif content.startswith("```md"):
-                content = content[5:]
-            if content.startswith("```"):
-                content = content[3:]
-            if content.endswith("```"):
-                content = content[:-3]
-                
-            return content.strip()
-            
-        except Exception as e:
-            print(f"❌ Error generating README: {e}")
+        """Generate a complete README.md string using Gemini API."""
+        print(f"🔍 Sending request to Gemini for README generation with model: {self.model}")
+        system_instruction = (
+            "You are an expert technical writer and developer. Generate a highly structured, accurate, "
+            "and visually appealing README.md based on the provided project context. Output ONLY the raw "
+            "markdown content without any prepended conversational text or ```markdown wrapper."
+        )
+        success, result = self._call_generate_content(prompt, system_instruction, max_output_tokens=2000)
+        if not success:
+            print(f"❌ Error generating README: {result}")
             return None
+        return result
 
     def generate_issue(self, context: str) -> Optional[str]:
-        """Generate a complete Issue markdown string using Gemini API"""
-        url = f"{self.base_url}/{self.model}:generateContent?key={self.api_key}"
-        headers = {"Content-Type": "application/json"}
-        
+        """Generate a complete Issue markdown string using Gemini API."""
+        print(f"🔍 Sending request to Gemini for Issue generation with model: {self.model}")
         prompt = f"Please generate a well-structured GitHub/GitLab issue using this context: {context}"
-        
-        data = {
-            "contents": [
-                {
-                    "parts": [{"text": prompt}],
-                    "role": "user"
-                }
-            ],
-            "system_instruction": {
-                "parts": [
-                    {
-                        "text": "You are an expert technical writer and developer. Generate a highly structured, accurate, and visually appealing GitHub/GitLab Issue template based on the provided context. If it sounds like a bug, format as a Bug Report (with Steps to Reproduce, Expected vs Actual). If it sounds like a feature, format as a Feature Request (with Problem, Proposed Solution). Output ONLY the raw markdown content without any prepended conversational text or ```markdown wrapper."
-                    }
-                ]
-            },
-            "generationConfig": {
-                "temperature": self.temperature,
-                "maxOutputTokens": 2000,
-                "topP": 0.95,
-                "topK": 40
-            }
-        }
-        
-        try:
-            print(f"🔍 Sending request to Gemini for Issue generation with model: {self.model}")
-            response = requests.post(url, headers=headers, json=data)
-            
-            if response.status_code != 200:
-                print(f"❌ API returned status {response.status_code}")
-                return None
-                
-            result = response.json()
-            
-            if 'error' in result:
-                print(f"❌ API Error: {result['error']['message']}")
-                return None
-                
-            content = None
-            if 'candidates' in result and len(result['candidates']) > 0:
-                candidate = result['candidates'][0]
-                if 'content' in candidate and 'parts' in candidate['content']:
-                    parts = candidate['content']['parts']
-                    if len(parts) > 0 and 'text' in parts[0]:
-                        content = parts[0]['text']
-                        
-            if not content:
-                print("❌ No content in API response")
-                return None
-                
-            # Strip markdown block wrappers if model still returns them
-            content = content.strip()
-            if content.startswith("```markdown"):
-                content = content[11:]
-            elif content.startswith("```md"):
-                content = content[5:]
-            if content.startswith("```"):
-                content = content[3:]
-            if content.endswith("```"):
-                content = content[:-3]
-                
-            return content.strip()
-            
-        except Exception as e:
-            print(f"❌ Error generating Issue: {e}")
+        system_instruction = (
+            "You are an expert technical writer and developer. Generate a highly structured, accurate, "
+            "and visually appealing GitHub/GitLab Issue template based on the provided context. If it sounds "
+            "like a bug, format as a Bug Report (with Steps to Reproduce, Expected vs Actual). If it sounds "
+            "like a feature, format as a Feature Request (with Problem, Proposed Solution). Output ONLY the "
+            "raw markdown content without any prepended conversational text or ```markdown wrapper."
+        )
+        success, result = self._call_generate_content(prompt, system_instruction, max_output_tokens=2000)
+        if not success:
+            print(f"❌ Error generating Issue: {result}")
             return None
+        return result

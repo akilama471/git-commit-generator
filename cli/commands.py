@@ -1,23 +1,37 @@
 import io
 import os
+import re
 import sys
 from datetime import datetime
 from pathlib import Path
-from typing import Optional  # Add this import
+from typing import Optional
 
 import click
 import pyperclip
+import requests
 from colorama import Fore, Style, init
-from prompt_toolkit import prompt
 
-# Force UTF-8 encoding for stdout/stderr on Windows
+ROOT = Path(__file__).resolve().parents[1]
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
+
+# Force UTF-8 encoding for stdout/stderr on Windows when supported
 if sys.platform == "win32":
-    sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding="utf-8", errors="replace")
-    sys.stderr = io.TextIOWrapper(sys.stderr.buffer, encoding="utf-8", errors="replace")
+    if hasattr(sys.stdout, "buffer") and getattr(sys.stdout, "encoding", "").lower() != "utf-8":
+        sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding="utf-8", errors="replace")
+    if hasattr(sys.stderr, "buffer") and getattr(sys.stderr, "encoding", "").lower() != "utf-8":
+        sys.stderr = io.TextIOWrapper(sys.stderr.buffer, encoding="utf-8", errors="replace")
 
-from ..core.services.ai_service import GeminiClient  # Or whichever client you're using
-from ..core.config.config_manager import create_default_config, get_config, save_api_key, save_model, save_github_token
-from ..core.services.git_service import (
+from core.config.config_manager import (
+    ConfigManager,
+    create_default_config,
+    get_config,
+    save_api_key,
+    save_github_token,
+    save_model,
+)
+from core.services.ai_service import GeminiClient
+from core.services.git_service import (
     commit_with_message,
     get_repo_info,
     get_repository_root,
@@ -25,7 +39,7 @@ from ..core.services.git_service import (
     run_git_command,
     stage_all_changes,
 )
-from ..core.utils.utils import edit_text, print_colored, select_from_menu
+from core.utils.utils import edit_text, print_colored, select_from_menu
 
 # Initialize colorama for Windows
 init(autoreset=True)
@@ -112,13 +126,13 @@ def generate(path: str, add: bool, commit: bool, model: Optional[str], copy: boo
         # Stage all changes if requested
         if add:
             print_colored("📦 Staging all changes...", "blue")
-            if not stage_all_changes():
+            if not stage_all_changes(repo_root):
                 print_colored("❌ Failed to stage changes", "red")
                 sys.exit(1)
             print_colored("✅ Changes staged", "green")
 
         # Get staged diff
-        git_diff = get_staged_diff()
+        git_diff = get_staged_diff(repo_root)
         if not git_diff or not git_diff.diff:
             print_colored("❌ No staged changes found!", "yellow")
             print("Use --add to stage all changes or run 'git add' first")
@@ -132,25 +146,29 @@ def generate(path: str, add: bool, commit: bool, model: Optional[str], copy: boo
             print(f"   ... and {len(git_diff.files) - 10} more")
 
         # Load config
-        config = get_config()
+        status_code, config = get_config()
+        if status_code != 200:
+            print_colored(f"❌ {config}", "red")
+            sys.exit(1)
 
         # Initialize AI client
         use_model = model or config.get("model", "gemini-2.0-flash-lite")
         client = GeminiClient(
             api_key=config["api_key"],
             model=use_model,
-            max_diff_len=config["max_diff_length"],
+            max_diff_len=config.get("max_diff_length", 5000),
             temperature=config.get("temperature", 0.7),
         )
 
         # Generate messages
         print_colored("\n🤖 Generating commit messages...", "blue")
-        options = client.generate_commit_messages(git_diff.diff)
+        ok, gen_result = client.generate_commit_messages_safe(git_diff.diff, files=git_diff.files)
 
-        if not options:
-            print_colored("❌ Failed to generate commit messages", "red")
+        if not ok or not isinstance(gen_result, list) or not gen_result:
+            print_colored(f"❌ {gen_result if isinstance(gen_result, str) else 'Failed to generate commit messages'}", "red")
             sys.exit(1)
 
+        options = list(gen_result)
         # Add custom option
         options.append("✏️  Write custom message")
 
@@ -189,7 +207,7 @@ def generate(path: str, add: bool, commit: bool, model: Optional[str], copy: boo
 
         # Perform commit
         print_colored("💾 Committing...", "blue")
-        if commit_with_message(edited):
+        if commit_with_message(edited, repo_root):
             print_colored("✅ Commit successful!", "green")
         else:
             print_colored("❌ Commit failed", "red")
@@ -210,13 +228,14 @@ def generate_issue_cmd(model: Optional[str] = None):
             return
 
         # Load config
-        config = get_config()
+        status_code, config = get_config()
+        if status_code != 200:
+            print_colored(f"❌ {config}", "red")
+            return
 
         # Initialize AI client
         use_model = model or config.get("model", "gemini-2.0-flash-lite")
-        from ..core.services.ai_service import GeminiClient as AIClient
-
-        client = AIClient(
+        client = GeminiClient(
             api_key=config["api_key"],
             model=use_model,
             temperature=config.get("temperature", 0.7),
@@ -301,14 +320,12 @@ def publish_issue_to_github(issue_md: str, config: dict):
         return
 
     # Extract owner and repo from remote
-    from ..core.services.git_service import run_git_command
     stdout, _, code = run_git_command(["git", "config", "--get", "remote.origin.url"])
     if code != 0 or not stdout.strip():
         print_colored("❌ Could not get git remote 'origin' URL.", "red")
         return
 
     remote_url = stdout.strip()
-    import re
     # Matches https://github.com/owner/repo(.git) or git@github.com:owner/repo(.git)
     match = re.search(r'github\.com[:/]([^/]+)/([^/]+?)(?:\.git)?$', remote_url)
     if not match:
@@ -345,15 +362,19 @@ def publish_issue_to_github(issue_md: str, config: dict):
             break
 
     print_colored(f"Publishing issue '{title}' to {owner}/{repo}...", "blue")
-    import requests
-    response = requests.post(
-        f"https://api.github.com/repos/{owner}/{repo}/issues",
-        headers={
-            "Authorization": f"token {token}",
-            "Accept": "application/vnd.github.v3+json"
-        },
-        json={"title": title, "body": body}
-    )
+    try:
+        response = requests.post(
+            f"https://api.github.com/repos/{owner}/{repo}/issues",
+            headers={
+                "Authorization": f"token {token}",
+                "Accept": "application/vnd.github.v3+json"
+            },
+            json={"title": title, "body": body},
+            timeout=25,
+        )
+    except requests.exceptions.RequestException as e:
+        print_colored(f"❌ Network error publishing issue: {e}", "red")
+        return
 
     if response.status_code == 201:
         issue_url = response.json().get("html_url")
@@ -361,13 +382,13 @@ def publish_issue_to_github(issue_md: str, config: dict):
         import webbrowser
         try:
             webbrowser.open(issue_url)
-        except:
+        except Exception:
             pass
     else:
         print_colored(f"❌ Failed to publish issue. Status Code: {response.status_code}", "red")
         try:
             print(response.json())
-        except:
+        except Exception:
             print(response.text)
 
 def generate_readme(repo_path: str, model: Optional[str] = None):
@@ -380,14 +401,14 @@ def generate_readme(repo_path: str, model: Optional[str] = None):
         repo_info = get_repo_info(repo_path)
 
         # Load config
-        config = get_config()
+        status_code, config = get_config()
+        if status_code != 200:
+            print_colored(f"❌ {config}", "red")
+            return
 
         # Initialize AI client
         use_model = model or config.get("model", "gemini-2.0-flash-lite")
-
-        from ..core.services.ai_service import GeminiClient as AIClient
-
-        client = AIClient(
+        client = GeminiClient(
             api_key=config["api_key"],
             model=use_model,
             max_diff_len=config.get("max_diff_length", 5000),
@@ -446,9 +467,9 @@ def generate_readme(repo_path: str, model: Optional[str] = None):
 
         # Ask if user wants to stage and commit the README
         if click.confirm("\n📦 Stage and commit the README.md?"):
-            stage_all_changes()
-            commit_message = f"docs: add comprehensive README documentation"
-            if commit_with_message(commit_message):
+            stage_all_changes(repo_path)
+            commit_message = "docs: add comprehensive README documentation"
+            if commit_with_message(commit_message, repo_path):
                 print_colored("✅ README committed successfully!", "green")
             else:
                 print_colored("❌ Failed to commit README", "red")
@@ -654,10 +675,10 @@ def set_github_token(token):
 @config.command("show")
 def show_config():
     """Show current configuration"""
-    config = get_config()
+    cfg = ConfigManager._load_config()
     print_colored("Current Configuration:", "cyan")
-    for key, value in config.items():
-        if key == "api_key":
+    for key, value in cfg.items():
+        if key in ("api_key", "github_token") and isinstance(value, str) and value:
             value = value[:5] + "..." + value[-5:] if len(value) > 10 else "***"
         print(f"  {key}: {value}")
 

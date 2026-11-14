@@ -7,7 +7,7 @@ from typing import Dict, List, Optional
 import customtkinter as ctk
 
 from core.config.config_manager import ConfigManager
-from core.services.ai_service import GeminiClient
+from core.services.ai_service import DEFAULT_MODELS, GeminiClient
 from core.services.commit_service import CommitService
 from core.services.git_service import GitService
 
@@ -17,10 +17,12 @@ ctk.set_default_color_theme("blue")
 
 
 class App(ctk.CTk):
-    """Modern, clean, and compact AI Git Commit Generator GUI with Pull, Push, and Selective Staging."""
+    """Lightweight, responsive AI Git Commit Generator GUI with Pull, Push, and Selective Staging."""
 
     FONT_FAMILY = "Segoe UI"
     MONO_FONT = "Consolas"
+    MAX_FILE_ROWS = 60
+    MAX_DIFF_PREVIEW_CHARS = 40000
 
     COLOR_PRIMARY = ("#2563EB", "#3B82F6")
     COLOR_PRIMARY_HOVER = ("#1D4ED8", "#60A5FA")
@@ -40,7 +42,7 @@ class App(ctk.CTk):
         super().__init__()
 
         self.title("AI Git Commit Generator")
-        self.geometry("980x650")
+        self.geometry("980x660")
         self.minsize(900, 560)
 
         self.project_path: Optional[str] = None
@@ -51,16 +53,14 @@ class App(ctk.CTk):
         self.show_github_token: bool = False
         self.selected_diff_file: Optional[str] = None
 
-        self.model_options = [
-            "gemini-2.0-flash-lite",
-            "gemini-2.0-flash",
-            "gemini-2.0-flash-thinking-exp-01-21",
-            "gemini-2.0-pro-exp-02-05",
-            "gemini-1.5-flash",
-            "gemini-1.5-flash-8b",
-            "gemini-1.5-pro",
-            "gemini-exp-1206",
-        ]
+        # Async request sequence guards & UI caches
+        self._status_req_id: int = 0
+        self._diff_req_id: int = 0
+        self._diff_text_req_id: int = 0
+        self._latest_status_summary: Optional[Dict] = None
+        self._file_row_widgets: Dict[str, ctk.CTkFrame] = {}
+
+        self.model_options = list(DEFAULT_MODELS)
 
         # Load initial config
         self._load_config_cache()
@@ -68,9 +68,14 @@ class App(ctk.CTk):
         # Build UI layout
         self._build_ui()
 
-        # Auto-detect git repo & background model fetch
-        self.after(100, self._auto_detect_current_directory)
-        self.after(500, self._silent_fetch_models)
+        # Keyboard shortcuts for fast workflow
+        self.bind("<Control-g>", lambda e: self.generate_commit_message_async())
+        self.bind("<Control-G>", lambda e: self.generate_commit_message_async())
+        self.bind("<Control-Return>", lambda e: self.create_commit())
+        self.bind("<F5>", lambda e: self._refresh_active_view())
+
+        # Auto-detect git repo asynchronously after UI renders
+        self.after(50, self._auto_detect_current_directory)
 
     def _load_config_cache(self):
         try:
@@ -79,19 +84,22 @@ class App(ctk.CTk):
             self.config_data = {}
 
     def _auto_detect_current_directory(self):
-        cwd = GitService.get_current_directory()
-        repo_root = GitService.get_repository_root(cwd)
-        if repo_root:
-            self._set_project(repo_root)
+        saved_path = (self.config_data.get("last_repo_path") or "").strip()
 
-    def _silent_fetch_models(self):
-        api_key = self.config_data.get("api_key", "")
-        if api_key and api_key != "your-api-key-here":
-            def _worker():
-                models = GeminiClient.list_available_models(api_key)
-                if models:
-                    self.after(0, lambda: self._update_model_dropdown_options(models))
-            threading.Thread(target=_worker, daemon=True).start()
+        def _worker():
+            cwd = GitService.get_current_directory()
+            repo_root = GitService.get_repository_root(cwd)
+            if not repo_root and saved_path and Path(saved_path).exists():
+                repo_root = GitService.get_repository_root(saved_path)
+            if repo_root:
+                self.after(0, lambda r=repo_root: self._set_project(r, save_last=False))
+
+        threading.Thread(target=_worker, daemon=True).start()
+
+    def _refresh_active_view(self):
+        self.refresh_git_status()
+        if self.current_view == "Diff" and self.project_path:
+            self._refresh_diff_view()
 
     def _update_model_dropdown_options(self, models: List[str]):
         if models:
@@ -301,12 +309,13 @@ class App(ctk.CTk):
 
         self.project_entry = ctk.CTkEntry(
             repo_card,
-            placeholder_text="Select a Git repository folder...",
+            placeholder_text="Select a Git repository folder (press Enter to load)...",
             height=30,
             corner_radius=6,
             font=ctk.CTkFont(family=self.FONT_FAMILY, size=11),
         )
         self.project_entry.grid(row=0, column=1, sticky="ew", padx=(0, 6), pady=(10, 4))
+        self.project_entry.bind("<Return>", lambda e: self._on_project_entry_submit())
 
         actions_frame = ctk.CTkFrame(repo_card, fg_color="transparent")
         actions_frame.grid(row=0, column=2, padx=(0, 10), pady=(10, 4), sticky="e")
@@ -382,10 +391,20 @@ class App(ctk.CTk):
         self.branch_badge = self._create_badge(self.badge_strip, "🌿 Branch: None", "#3B82F6")
         self.branch_badge.pack(side="left", padx=(0, 6))
 
-        self.staged_badge = self._create_badge(self.badge_strip, "● 0 staged", "#6B7280")
+        self.staged_badge = self._create_badge(
+            self.badge_strip,
+            "● 0 staged",
+            "#6B7280",
+            on_click=lambda: self.show_view("Diff"),
+        )
         self.staged_badge.pack(side="left", padx=(0, 6))
 
-        self.unstaged_badge = self._create_badge(self.badge_strip, "● 0 modified", "#6B7280")
+        self.unstaged_badge = self._create_badge(
+            self.badge_strip,
+            "● 0 modified",
+            "#6B7280",
+            on_click=lambda: self.show_view("Diff"),
+        )
         self.unstaged_badge.pack(side="left", padx=(0, 6))
 
         self.unpushed_badge = self._create_badge(self.badge_strip, "↑ 0 unpushed", "#6B7280")
@@ -552,6 +571,14 @@ class App(ctk.CTk):
         )
         self.total_lines_badge.pack(side="left", padx=10)
 
+        shortcut_hint = ctk.CTkLabel(
+            editor_footer,
+            text="Ctrl+G Generate • Ctrl+Enter Commit • F5 Refresh",
+            font=ctk.CTkFont(family=self.FONT_FAMILY, size=10),
+            text_color=self.COLOR_TEXT_MUTED,
+        )
+        shortcut_hint.pack(side="right")
+
         # --- Bottom Card: Action Controls & Status Bar ---
         action_card = ctk.CTkFrame(
             view,
@@ -563,13 +590,13 @@ class App(ctk.CTk):
         action_card.grid(row=3, column=0, sticky="ew")
 
         action_inner = ctk.CTkFrame(action_card, fg_color="transparent")
-        action_inner.pack(fill="x", padx=12, pady=8)
+        action_inner.pack(fill="x", padx=12, pady=(8, 4))
 
         self.generate_button = ctk.CTkButton(
             action_inner,
             text="✨ Generate AI Commit",
             height=34,
-            width=165,
+            width=155,
             corner_radius=8,
             font=ctk.CTkFont(family=self.FONT_FAMILY, size=12, weight="bold"),
             fg_color=self.COLOR_PRIMARY,
@@ -582,7 +609,7 @@ class App(ctk.CTk):
             action_inner,
             text="✓ Commit to Git",
             height=34,
-            width=135,
+            width=125,
             corner_radius=8,
             font=ctk.CTkFont(family=self.FONT_FAMILY, size=12, weight="bold"),
             fg_color=self.COLOR_SUCCESS,
@@ -595,7 +622,7 @@ class App(ctk.CTk):
             action_inner,
             text="📥 Pull",
             height=34,
-            width=80,
+            width=72,
             corner_radius=8,
             font=ctk.CTkFont(family=self.FONT_FAMILY, size=12, weight="bold"),
             fg_color=self.COLOR_TEAL,
@@ -606,16 +633,26 @@ class App(ctk.CTk):
 
         self.push_button = ctk.CTkButton(
             action_inner,
-            text="🚀 Push to Remote",
+            text="🚀 Push",
             height=34,
-            width=135,
+            width=88,
             corner_radius=8,
             font=ctk.CTkFont(family=self.FONT_FAMILY, size=12, weight="bold"),
             fg_color=self.COLOR_PURPLE,
             hover_color=self.COLOR_PURPLE_HOVER,
             command=self.push_commits_async,
         )
-        self.push_button.pack(side="left", padx=(0, 8))
+        self.push_button.pack(side="left", padx=(0, 10))
+
+        self.auto_stage_var = ctk.BooleanVar(value=True)
+        self.auto_stage_cb = ctk.CTkCheckBox(
+            action_inner,
+            text="Auto-stage all",
+            variable=self.auto_stage_var,
+            font=ctk.CTkFont(family=self.FONT_FAMILY, size=11),
+            width=105,
+        )
+        self.auto_stage_cb.pack(side="left", padx=(0, 8))
 
         self.auto_push_var = ctk.BooleanVar(value=False)
         self.auto_push_cb = ctk.CTkCheckBox(
@@ -625,11 +662,14 @@ class App(ctk.CTk):
             font=ctk.CTkFont(family=self.FONT_FAMILY, size=11),
             width=85,
         )
-        self.auto_push_cb.pack(side="left", padx=(0, 8))
+        self.auto_push_cb.pack(side="left")
 
-        # Real-time Status Indicator Label
+        # Real-time Status Indicator Bar
+        status_bar = ctk.CTkFrame(action_card, fg_color="transparent")
+        status_bar.pack(fill="x", padx=12, pady=(0, 6))
+
         self.status_label = ctk.CTkLabel(
-            action_inner,
+            status_bar,
             text="● Ready",
             font=ctk.CTkFont(family=self.FONT_FAMILY, size=11),
             text_color=self.COLOR_TEXT_MUTED,
@@ -639,21 +679,26 @@ class App(ctk.CTk):
 
         return view
 
-    def _create_badge(self, parent, text: str, color_hex: str) -> ctk.CTkFrame:
+    def _create_badge(self, parent, text: str, color_hex: str, on_click=None) -> ctk.CTkFrame:
         badge = ctk.CTkFrame(
             parent,
             fg_color=self.COLOR_INNER_BG,
             corner_radius=5,
             border_width=1,
             border_color=self.COLOR_BORDER,
+            cursor="hand2" if on_click else "",
         )
         lbl = ctk.CTkLabel(
             badge,
             text=text,
             font=ctk.CTkFont(family=self.FONT_FAMILY, size=10, weight="bold"),
             text_color=color_hex,
+            cursor="hand2" if on_click else "",
         )
         lbl.pack(padx=6, pady=2)
+        if on_click:
+            badge.bind("<Button-1>", lambda e: on_click())
+            lbl.bind("<Button-1>", lambda e: on_click())
         badge.label = lbl
         return badge
 
@@ -843,18 +888,29 @@ class App(ctk.CTk):
             self._render_file_checklist([])
             return
 
-        # Fetch detailed file status
-        files_status = GitService.get_detailed_file_status(self.project_path)
-        self._render_file_checklist(files_status)
+        self._diff_req_id += 1
+        req_id = self._diff_req_id
+        path = self.project_path
 
-        # Update diff text
+        def _worker():
+            files_status = GitService.get_detailed_file_status(path)
+            self.after(0, lambda: self._on_diff_list_loaded(req_id, files_status))
+
+        threading.Thread(target=_worker, daemon=True).start()
         self._update_diff_textbox()
+
+    def _on_diff_list_loaded(self, req_id: int, files_status: List[Dict]):
+        if req_id != self._diff_req_id:
+            return
+        self._render_file_checklist(files_status)
 
     def _render_file_checklist(self, files_status: List[Dict]):
         for widget in self.file_checklist_frame.winfo_children():
             widget.destroy()
+        self._file_row_widgets.clear()
 
-        self.file_count_label.configure(text=f"Changed Files ({len(files_status)})")
+        total_files = len(files_status)
+        self.file_count_label.configure(text=f"Changed Files ({total_files})")
 
         if not files_status:
             no_files_lbl = ctk.CTkLabel(
@@ -867,7 +923,8 @@ class App(ctk.CTk):
             no_files_lbl.pack(pady=30)
             return
 
-        for item in files_status:
+        visible_files = files_status[: self.MAX_FILE_ROWS]
+        for item in visible_files:
             file_path = item["file"]
             is_staged = item["staged"]
             status_type = item["status_type"]
@@ -878,6 +935,7 @@ class App(ctk.CTk):
                 corner_radius=6,
             )
             row_frame.pack(fill="x", pady=2, padx=2)
+            self._file_row_widgets[file_path] = row_frame
 
             var = ctk.BooleanVar(value=is_staged)
             cb = ctk.CTkCheckBox(
@@ -890,7 +948,6 @@ class App(ctk.CTk):
             )
             cb.pack(side="left", padx=(6, 4))
 
-            # Status Badge color
             badge_color = "#3B82F6"
             badge_char = item.get("index_status", "") or item.get("work_status", "M")
             if "Added" in status_type or "Untracked" in status_type:
@@ -912,7 +969,6 @@ class App(ctk.CTk):
             )
             tag_lbl.pack(side="left")
 
-            # Clickable file label to view diff
             file_btn = ctk.CTkButton(
                 row_frame,
                 text=file_path,
@@ -926,63 +982,117 @@ class App(ctk.CTk):
             )
             file_btn.pack(side="left", fill="x", expand=True, padx=(2, 6))
 
+        if total_files > self.MAX_FILE_ROWS:
+            more_lbl = ctk.CTkLabel(
+                self.file_checklist_frame,
+                text=f"... and {total_files - self.MAX_FILE_ROWS} more file(s)",
+                font=ctk.CTkFont(family=self.FONT_FAMILY, size=10),
+                text_color=self.COLOR_TEXT_MUTED,
+            )
+            more_lbl.pack(pady=(6, 4))
+
     def _on_file_checkbox_toggle(self, file_path: str, var: ctk.BooleanVar):
         if not self.project_path:
             return
 
         should_stage = var.get()
-        if should_stage:
-            GitService.stage_single_file(file_path, self.project_path)
-            self.status_label.configure(text=f"✓ Staged: {file_path}", text_color=self.COLOR_SUCCESS[1])
-        else:
-            GitService.unstage_single_file(file_path, self.project_path)
-            self.status_label.configure(text=f"✓ Unstaged: {file_path}", text_color=self.COLOR_TEXT_MUTED)
+        path = self.project_path
+        self.status_label.configure(
+            text=f"⏳ {'Staging' if should_stage else 'Unstaging'} {file_path}...",
+            text_color="#3B82F6",
+        )
 
+        def _worker():
+            if should_stage:
+                ok = GitService.stage_single_file(file_path, path)
+            else:
+                ok = GitService.unstage_single_file(file_path, path)
+            self.after(0, lambda: self._on_file_stage_complete(file_path, should_stage, ok))
+
+        threading.Thread(target=_worker, daemon=True).start()
+
+    def _on_file_stage_complete(self, file_path: str, staged: bool, ok: bool):
+        if ok:
+            verb = "Staged" if staged else "Unstaged"
+            color = self.COLOR_SUCCESS[1] if staged else self.COLOR_TEXT_MUTED
+            self.status_label.configure(text=f"✓ {verb}: {file_path}", text_color=color)
+        else:
+            self.status_label.configure(text=f"❌ Failed to update {file_path}", text_color=self.COLOR_DANGER[1])
         self.refresh_git_status()
         self._update_diff_textbox()
 
     def _select_file_for_diff(self, file_path: Optional[str]):
+        old_file = self.selected_diff_file
         self.selected_diff_file = file_path
+
+        if old_file and old_file in self._file_row_widgets:
+            old_widget = self._file_row_widgets[old_file]
+            if old_widget.winfo_exists():
+                old_widget.configure(fg_color="transparent")
+
+        if file_path and file_path in self._file_row_widgets:
+            new_widget = self._file_row_widgets[file_path]
+            if new_widget.winfo_exists():
+                new_widget.configure(fg_color=self.COLOR_INNER_BG)
+
         self._update_diff_textbox()
-        if self.current_view == "Diff":
-            # Re-render file list to update row selection highlight
-            files_status = GitService.get_detailed_file_status(self.project_path)
-            self._render_file_checklist(files_status)
 
     def _update_diff_textbox(self):
         if not self.project_path:
             return
 
-        if self.selected_diff_file:
-            self.diff_preview_title.configure(text=f"Diff Preview: {self.selected_diff_file}")
-            diff_text = GitService.get_file_diff(self.selected_diff_file, self.project_path)
-            if not diff_text.strip():
-                diff_text = f"# No diff changes found for {self.selected_diff_file}."
+        self._diff_text_req_id += 1
+        req_id = self._diff_text_req_id
+        path = self.project_path
+        selected_file = self.selected_diff_file
+
+        if selected_file:
+            self.diff_preview_title.configure(text=f"Diff Preview: {selected_file}")
         else:
             self.diff_preview_title.configure(text="Diff Preview: All Staged Changes")
-            git_diff = GitService.get_staged_diff(self.project_path)
-            status_summary = GitService.get_repo_status_summary(self.project_path)
 
-            lines = []
-            lines.append(f"# Repository: {Path(self.project_path).name}")
-            lines.append(f"# Active Branch: {status_summary.get('branch', 'unknown')}")
-            lines.append(f"# Unpushed Commits: {status_summary.get('unpushed_count', 0)}\n")
-
-            lines.append("## Staged Files (will be analyzed for commit):")
-            staged = status_summary.get("staged_files", [])
-            if staged:
-                for s in staged:
-                    lines.append(f"  [{s['status']}] {s['file']}")
+        def _worker():
+            if selected_file:
+                diff_text = GitService.get_file_diff(selected_file, path)
+                if not diff_text.strip():
+                    diff_text = f"# No diff changes found for {selected_file}."
             else:
-                lines.append("  (No staged files - check boxes or click '+ Stage All')")
+                git_diff = GitService.get_staged_diff(path)
+                status_summary = GitService.get_repo_status_summary(path)
 
-            lines.append("\n" + "=" * 60 + "\n## Staged Unified Diff Preview:\n" + "=" * 60 + "\n")
-            if git_diff and git_diff.diff:
-                lines.append(git_diff.diff)
-            else:
-                lines.append("No staged diff content available.")
-            diff_text = "\n".join(lines)
+                lines = [
+                    f"# Repository: {Path(path).name}",
+                    f"# Active Branch: {status_summary.get('branch', 'unknown')}",
+                    f"# Unpushed Commits: {status_summary.get('unpushed_count', 0)}\n",
+                    "## Staged Files (will be analyzed for commit):",
+                ]
+                staged = status_summary.get("staged_files", [])
+                if staged:
+                    for s in staged:
+                        lines.append(f"  [{s['status']}] {s['file']}")
+                else:
+                    lines.append("  (No staged files - check boxes or click '+ Stage All')")
 
+                lines.append("\n" + "=" * 60 + "\n## Staged Unified Diff Preview:\n" + "=" * 60 + "\n")
+                if git_diff and git_diff.diff:
+                    lines.append(git_diff.diff)
+                else:
+                    lines.append("No staged diff content available.")
+                diff_text = "\n".join(lines)
+
+            if len(diff_text) > self.MAX_DIFF_PREVIEW_CHARS:
+                diff_text = (
+                    diff_text[: self.MAX_DIFF_PREVIEW_CHARS]
+                    + "\n\n... [Diff preview truncated at 40,000 chars for UI performance]"
+                )
+
+            self.after(0, lambda: self._apply_diff_textbox(req_id, diff_text))
+
+        threading.Thread(target=_worker, daemon=True).start()
+
+    def _apply_diff_textbox(self, req_id: int, diff_text: str):
+        if req_id != self._diff_text_req_id:
+            return
         self.diff_textbox.delete("1.0", "end")
         self.diff_textbox.insert("1.0", diff_text)
 
@@ -1434,28 +1544,67 @@ class App(ctk.CTk):
     def select_project(self):
         folder = filedialog.askdirectory(title="Select Git Project Folder")
         if folder:
-            repo_root = GitService.get_repository_root(folder)
-            if not repo_root:
-                messagebox.showwarning(
-                    "Invalid Repository",
-                    "No .git repository found in the selected folder.\nPlease select a valid Git repository.",
-                )
-                return
-            self._set_project(repo_root)
+            self._validate_and_load_project_async(folder)
 
-    def _set_project(self, repo_root: str):
+    def _on_project_entry_submit(self):
+        folder = (self.project_entry.get() or "").strip()
+        if folder:
+            self._validate_and_load_project_async(folder)
+
+    def _validate_and_load_project_async(self, folder: str):
+        self.status_label.configure(text="⏳ Opening repository...", text_color="#3B82F6")
+
+        def _worker():
+            repo_root = GitService.get_repository_root(folder)
+            self.after(0, lambda: self._on_project_validated(repo_root))
+
+        threading.Thread(target=_worker, daemon=True).start()
+
+    def _on_project_validated(self, repo_root: Optional[str]):
+        if not repo_root:
+            self.status_label.configure(text="❌ Not a valid Git repository", text_color=self.COLOR_DANGER[1])
+            messagebox.showwarning(
+                "Invalid Repository",
+                "No .git repository found in the selected folder.\nPlease select a valid Git repository.",
+            )
+            return
+        self._set_project(repo_root)
+
+    def _set_project(self, repo_root: str, save_last: bool = True):
         self.project_path = repo_root
+        self.selected_diff_file = None
         self.project_entry.delete(0, "end")
         self.project_entry.insert(0, repo_root)
         self.repo_name_label.configure(text=Path(repo_root).name)
+        if save_last and repo_root != self.config_data.get("last_repo_path"):
+            self.config_data["last_repo_path"] = repo_root
+            threading.Thread(
+                target=lambda: ConfigManager.save_settings({"last_repo_path": repo_root}),
+                daemon=True,
+            ).start()
         self.refresh_git_status()
+        if self.current_view == "Diff":
+            self._refresh_diff_view()
 
     def refresh_git_status(self):
         path = (self.project_entry.get() or "").strip() or self.project_path
         if not path:
             return
 
-        summary = GitService.get_repo_status_summary(path)
+        self._status_req_id += 1
+        req_id = self._status_req_id
+
+        def _worker():
+            summary = GitService.get_repo_status_summary(path)
+            self.after(0, lambda: self._apply_git_status(req_id, summary))
+
+        threading.Thread(target=_worker, daemon=True).start()
+
+    def _apply_git_status(self, req_id: int, summary: Dict):
+        if req_id != self._status_req_id:
+            return
+
+        self._latest_status_summary = summary
         if not summary.get("is_repo"):
             self._set_badge_text(self.branch_badge, "🌿 None", "#EF4444")
             self._set_badge_text(self.staged_badge, "● 0 staged", "#6B7280")
@@ -1466,7 +1615,9 @@ class App(ctk.CTk):
         branch = summary.get("branch", "unknown")
         staged_count = len(summary.get("staged_files", []))
         unstaged_count = len(summary.get("unstaged_files", []))
+        untracked_count = len(summary.get("untracked_files", []))
         unpushed_count = summary.get("unpushed_count", 0)
+        pending_count = unstaged_count + untracked_count
 
         self._set_badge_text(self.branch_badge, f"🌿 {branch}", "#3B82F6")
         self._set_badge_text(
@@ -1476,8 +1627,8 @@ class App(ctk.CTk):
         )
         self._set_badge_text(
             self.unstaged_badge,
-            f"● {unstaged_count} modified",
-            "#F59E0B" if unstaged_count > 0 else "#6B7280",
+            f"● {pending_count} unstaged" if untracked_count else f"● {unstaged_count} modified",
+            "#F59E0B" if pending_count > 0 else "#6B7280",
         )
         self._set_badge_text(
             self.unpushed_badge,
@@ -1486,6 +1637,8 @@ class App(ctk.CTk):
         )
 
         status_txt = f"● Ready • {staged_count} staged"
+        if pending_count > 0:
+            status_txt += f" • {pending_count} unstaged"
         if unpushed_count > 0:
             status_txt += f" • {unpushed_count} unpushed commit(s)"
 
@@ -1500,41 +1653,74 @@ class App(ctk.CTk):
             messagebox.showwarning("Project Required", "Please select a project folder first.")
             return
 
-        success = GitService.stage_all_changes(path)
-        if success:
-            self.refresh_git_status()
-            if self.current_view == "Diff":
-                self._refresh_diff_view()
-            self.status_label.configure(text="✓ All changes staged", text_color=self.COLOR_SUCCESS[1])
-        else:
-            messagebox.showerror("Error", "Failed to stage changes.")
+        self.status_label.configure(text="⏳ Staging all changes...", text_color="#3B82F6")
+
+        def _worker():
+            success = GitService.stage_all_changes(path)
+            self.after(0, lambda: self._on_stage_all_complete(success, staged=True))
+
+        threading.Thread(target=_worker, daemon=True).start()
 
     def unstage_all_changes_ui(self):
         path = (self.project_entry.get() or "").strip() or self.project_path
         if not path:
             return
 
-        success = GitService.unstage_all_changes(path)
+        self.status_label.configure(text="⏳ Unstaging all changes...", text_color="#3B82F6")
+
+        def _worker():
+            success = GitService.unstage_all_changes(path)
+            self.after(0, lambda: self._on_stage_all_complete(success, staged=False))
+
+        threading.Thread(target=_worker, daemon=True).start()
+
+    def _on_stage_all_complete(self, success: bool, staged: bool):
         if success:
             self.refresh_git_status()
             if self.current_view == "Diff":
                 self._refresh_diff_view()
-            self.status_label.configure(text="✓ All changes unstaged", text_color=self.COLOR_TEXT_MUTED)
+            if staged:
+                self.status_label.configure(text="✓ All changes staged", text_color=self.COLOR_SUCCESS[1])
+            else:
+                self.status_label.configure(text="✓ All changes unstaged", text_color=self.COLOR_TEXT_MUTED)
+        else:
+            self.status_label.configure(text="❌ Staging action failed", text_color=self.COLOR_DANGER[1])
+            messagebox.showerror("Error", f"Failed to {'stage' if staged else 'unstage'} changes.")
 
     # -------------------------------------------------------------------------
     # AI Generation (Threaded Async)
     # -------------------------------------------------------------------------
     def generate_commit_message_async(self):
+        if self.generate_button.cget("state") == "disabled":
+            return
+
         project = (self.project_entry.get() or "").strip() or self.project_path
         if not project:
             messagebox.showwarning("Project Required", "Please select a project folder.")
             return
 
+        auto_stage = self.auto_stage_var.get()
+        summary = self._latest_status_summary
+        if not auto_stage and summary and summary.get("is_repo"):
+            staged_count = len(summary.get("staged_files", []))
+            pending_count = len(summary.get("unstaged_files", [])) + len(summary.get("untracked_files", []))
+            if staged_count == 0 and pending_count > 0:
+                if not messagebox.askyesno(
+                    "No Staged Changes",
+                    f"No files are staged, but {pending_count} change(s) exist.\n"
+                    "Stage all changes and generate commit message?",
+                ):
+                    return
+                auto_stage = True
+
+        selected_model = (self.model_dropdown.get() or "").strip() or None
         self.status_label.configure(text="⏳ Analyzing diff & generating...", text_color="#3B82F6")
         self.generate_button.configure(state="disabled", text="✨ Generating...")
 
         def _worker():
-            success, result = CommitService.generate_commit_options(project, None)
+            success, result = CommitService.generate_commit_options(
+                project, selected_model, auto_stage=auto_stage
+            )
             self.after(0, lambda: self._on_generation_complete(success, result))
 
         threading.Thread(target=_worker, daemon=True).start()
@@ -1554,10 +1740,6 @@ class App(ctk.CTk):
             self.commit_text.insert("1.0", result[0])
             self._render_option_pills()
             self._on_text_change()
-            self.status_label.configure(
-                text="✓ Commit generated",
-                text_color=self.COLOR_SUCCESS[1],
-            )
         elif isinstance(result, str):
             self.generated_options = [result]
             self.selected_option_idx = 0
@@ -1565,12 +1747,19 @@ class App(ctk.CTk):
             self.commit_text.insert("1.0", result)
             self._render_option_pills()
             self._on_text_change()
-            self.status_label.configure(text="✓ Commit generated", text_color=self.COLOR_SUCCESS[1])
+
+        self.refresh_git_status()
+        if self.current_view == "Diff":
+            self._refresh_diff_view()
+        self.status_label.configure(text="✓ Commit message generated", text_color=self.COLOR_SUCCESS[1])
 
     # -------------------------------------------------------------------------
     # Commit Execution
     # -------------------------------------------------------------------------
     def create_commit(self):
+        if self.create_button.cget("state") == "disabled":
+            return
+
         project = (self.project_entry.get() or "").strip() or self.project_path
         message = self.commit_text.get("1.0", "end-1c").strip()
 
@@ -1590,18 +1779,16 @@ class App(ctk.CTk):
         self.create_button.configure(state="disabled")
 
         def _worker():
-            success = GitService.commit_with_message(message, project, commit_datetime)
-            self.after(0, lambda: self._on_commit_complete(success))
+            success, details = GitService.commit_with_message_detailed(
+                message, project, commit_datetime
+            )
+            self.after(0, lambda: self._on_commit_complete(success, details))
 
         threading.Thread(target=_worker, daemon=True).start()
 
-    def _on_commit_complete(self, success: bool):
+    def _on_commit_complete(self, success: bool, details: str):
         self.create_button.configure(state="normal")
         if success:
-            self.status_label.configure(
-                text="✓ Commit created successfully!",
-                text_color=self.COLOR_SUCCESS[1],
-            )
             self.commit_text.delete("1.0", "end")
             self.generated_options = []
             self._render_option_pills()
@@ -1610,16 +1797,18 @@ class App(ctk.CTk):
             if self.current_view == "Diff":
                 self._refresh_diff_view()
 
-            # Auto-push if enabled
+            self.status_label.configure(
+                text="✓ Commit created successfully!",
+                text_color=self.COLOR_SUCCESS[1],
+            )
+
             if self.auto_push_var.get():
                 self.push_commits_async()
-            else:
-                messagebox.showinfo("Success", "Git commit created successfully.")
         else:
             self.status_label.configure(text="❌ Commit failed", text_color=self.COLOR_DANGER[1])
             messagebox.showerror(
                 "Commit Failed",
-                "Failed to create the commit. Please ensure there are staged changes and try again.",
+                f"Failed to create commit:\n\n{details}",
             )
 
     # -------------------------------------------------------------------------
@@ -1649,11 +1838,11 @@ class App(ctk.CTk):
             self._refresh_diff_view()
 
         if success:
+            short_msg = msg.splitlines()[0][:80] if msg else "Already up to date."
             self.status_label.configure(
-                text="✓ Pull completed successfully!",
+                text=f"✓ Pull complete: {short_msg}",
                 text_color=self.COLOR_SUCCESS[1],
             )
-            messagebox.showinfo("Pull Success", f"Successfully pulled from remote:\n\n{msg}")
         else:
             self.status_label.configure(text="❌ Pull failed", text_color=self.COLOR_DANGER[1])
             messagebox.showerror("Pull Failed", f"Failed to pull from remote:\n\n{msg}")
@@ -1678,7 +1867,7 @@ class App(ctk.CTk):
         threading.Thread(target=_worker, daemon=True).start()
 
     def _on_push_complete(self, success: bool, msg: str):
-        self.push_button.configure(state="normal", text="🚀 Push to Remote")
+        self.push_button.configure(state="normal", text="🚀 Push")
         self.top_push_btn.configure(state="normal")
         self.refresh_git_status()
         if self.current_view == "Diff":
@@ -1689,7 +1878,6 @@ class App(ctk.CTk):
                 text="✓ Pushed to remote successfully!",
                 text_color=self.COLOR_SUCCESS[1],
             )
-            messagebox.showinfo("Push Success", f"Successfully pushed commits to remote:\n\n{msg}")
         else:
             self.status_label.configure(text="❌ Push failed", text_color=self.COLOR_DANGER[1])
             messagebox.showerror("Push Failed", f"Failed to push commits to remote:\n\n{msg}")

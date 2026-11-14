@@ -28,7 +28,7 @@ setup(
     install_requires=requirements,
     entry_points={
         "console_scripts": [
-            "git-commit-ai=core.cli:main",
+            "git-commit-ai=cli.commands:main",
         ],
     },
 )

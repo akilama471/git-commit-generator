@@ -1,10 +1,22 @@
 import datetime
 import os
+import re
 import subprocess
 import tempfile
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
+
+
+LOCK_FILES = {
+    "package-lock.json",
+    "yarn.lock",
+    "pnpm-lock.yaml",
+    "Cargo.lock",
+    "poetry.lock",
+    "composer.lock",
+    "Gemfile.lock",
+}
 
 
 @dataclass
@@ -15,6 +27,8 @@ class GitDiff:
 
 
 class GitService:
+    _root_cache: Dict[str, str] = {}
+
     def __init__(self, diff: str, staged: bool, files: List[str]):
         self.diff = diff
         self.staged = staged
@@ -22,7 +36,7 @@ class GitService:
 
     @staticmethod
     def get_repo_info(repo_path: str) -> Dict:
-        """Get information about the repository"""
+        """Get information about the repository in a single bounded walk."""
 
         info = {
             "name": os.path.basename(repo_path),
@@ -50,7 +64,7 @@ class GitService:
             if readme_path.exists():
                 try:
                     with open(readme_path, "r", encoding="utf-8", errors="ignore") as f:
-                        content = f.read()
+                        content = f.read(4096)
                         for line in content.split("\n")[:10]:
                             if line.strip() and not line.startswith("#") and len(line) < 200:
                                 info["description"] = line.strip()
@@ -58,74 +72,68 @@ class GitService:
                 except Exception:
                     pass
 
+            skip_dirs = {
+                ".git",
+                "__pycache__",
+                "node_modules",
+                "venv",
+                "env",
+                ".venv",
+                "dist",
+                "build",
+                ".idea",
+                ".vscode",
+            }
             languages = set()
+            top_files = []
+            inspected_files = 0
+            max_files = 100
+            max_depth = 3
+
             for root, dirs, files in os.walk(repo_path):
-                if ".git" in dirs:
-                    dirs.remove(".git")
+                rel_root = os.path.relpath(root, repo_path)
+                depth = 0 if rel_root == "." else len(rel_root.split(os.sep))
+                if depth >= max_depth:
+                    dirs[:] = []
+                else:
+                    dirs[:] = [d for d in dirs if d not in skip_dirs]
 
-                skip_dirs = [
-                    "__pycache__",
-                    "node_modules",
-                    "venv",
-                    "env",
-                    ".venv",
-                    "dist",
-                    "build",
-                    ".idea",
-                    ".vscode",
-                ]
-                for skip in skip_dirs:
-                    if skip in dirs:
-                        dirs.remove(skip)
+                if depth == 0:
+                    info["has_license"] = any(
+                        f.lower() in ("license", "license.txt", "license.md", "licence")
+                        for f in files
+                    )
+                    info["has_contributing"] = any(
+                        f.lower().startswith("contributing") for f in files
+                    )
 
-                for file in files[:50]:
+                for file in files:
+                    if inspected_files >= max_files:
+                        break
+                    inspected_files += 1
+
                     ext = os.path.splitext(file)[1].lower()
                     if ext:
                         lang = GitService.get_language_from_extension(ext)
                         if lang:
                             languages.add(lang)
 
-            info["languages"] = list(languages)
-            if languages:
-                info["primary_language"] = list(languages)[0]
-
-            top_files = []
-            for root, dirs, files in os.walk(repo_path):
-                if ".git" in dirs:
-                    dirs.remove(".git")
-
-                skip_dirs = [
-                    "__pycache__",
-                    "node_modules",
-                    "venv",
-                    "env",
-                    ".venv",
-                    "dist",
-                    "build",
-                ]
-                for skip in skip_dirs:
-                    if skip in dirs:
-                        dirs.remove(skip)
-
-                for file in files[:20]:
-                    if not file.startswith(".") and file not in ["README.md", "LICENSE", ".gitignore"]:
+                    if (
+                        len(top_files) < 15
+                        and not file.startswith(".")
+                        and file not in ("README.md", "LICENSE", ".gitignore")
+                    ):
                         rel_path = os.path.relpath(os.path.join(root, file), repo_path)
                         if not rel_path.startswith("."):
                             top_files.append(rel_path)
 
-            info["top_files"] = top_files[:15]
+                if inspected_files >= max_files:
+                    break
 
-            try:
-                files_list = os.listdir(repo_path)
-                info["has_license"] = any(
-                    f.lower() in ["license", "license.txt", "license.md", "licence"]
-                    for f in files_list
-                )
-                info["has_contributing"] = any(
-                    f.lower().startswith("contributing") for f in files_list
-                )
-            except Exception:
-                pass
+            info["languages"] = list(languages)
+            if languages:
+                info["primary_language"] = info["languages"][0]
+            info["top_files"] = top_files[:15]
 
         except Exception as e:
             print(f"⚠️  Error getting repo info: {e}")
@@ -192,39 +200,80 @@ class GitService:
         return os.getcwd()
 
     @staticmethod
-    def run_git_command(cmd: List[str], cwd: Optional[str] = None) -> Tuple[str, str, int]:
-        """Run a git command and return output with UTF-8 encoding."""
+    def run_git_command(
+        cmd: List[str],
+        cwd: Optional[str] = None,
+        timeout: int = 15,
+        env: Optional[Dict[str, str]] = None,
+    ) -> Tuple[str, str, int]:
+        """Run a git command non-interactively with timeout and UTF-8 encoding."""
+        process = None
         try:
+            proc_env = os.environ.copy()
+            proc_env["GIT_TERMINAL_PROMPT"] = "0"
+            proc_env["GCM_INTERACTIVE"] = "never"
+            if env:
+                proc_env.update(env)
+
+            creationflags = subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0
             process = subprocess.Popen(
                 cmd,
                 cwd=cwd,
+                stdin=subprocess.DEVNULL,
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
                 text=True,
                 encoding="utf-8",
                 errors="replace",
                 shell=False,
+                env=proc_env,
+                creationflags=creationflags,
             )
-            stdout, stderr = process.communicate()
+            stdout, stderr = process.communicate(timeout=timeout)
             return stdout, stderr, process.returncode
+        except subprocess.TimeoutExpired:
+            if process is not None:
+                try:
+                    process.kill()
+                    process.communicate()
+                except Exception:
+                    pass
+            return "", f"Git command timed out after {timeout}s.", 124
         except Exception as e:
             return "", str(e), 1
 
     @staticmethod
-    def get_staged_diff(repo_path: str) -> Optional[GitDiff]:
-        """Get diff of staged changes"""
+    def get_staged_diff(repo_path: Optional[str] = None) -> Optional[GitDiff]:
+        """Get diff of staged changes with stat summary and lockfile noise filtering."""
         try:
-            files_out, _, _ = GitService.run_git_command(
+            files_out, _, code = GitService.run_git_command(
                 ["git", "diff", "--cached", "--name-only"],
                 cwd=repo_path,
             )
-            files = [f.strip() for f in files_out.split("\n") if f.strip()]
+            if code != 0:
+                return None
 
+            files = [f.strip() for f in files_out.splitlines() if f.strip()]
             if not files:
                 return None
 
-            diff_out, _, _ = GitService.run_git_command(["git", "diff", "--cached"], cwd=repo_path)
-            return GitDiff(diff=diff_out, staged=True, files=files)
+            stat_out, _, _ = GitService.run_git_command(
+                ["git", "diff", "--cached", "--stat"],
+                cwd=repo_path,
+            )
+
+            non_lock_files = [f for f in files if os.path.basename(f) not in LOCK_FILES]
+            diff_cmd = ["git", "diff", "--cached"]
+            if non_lock_files and len(non_lock_files) < len(files) and len(non_lock_files) <= 100:
+                diff_cmd.append("--")
+                diff_cmd.extend(non_lock_files)
+
+            diff_out, _, _ = GitService.run_git_command(diff_cmd, cwd=repo_path)
+            if stat_out.strip():
+                combined = f"Stat summary:\n{stat_out.strip()}\n\n{diff_out}"
+            else:
+                combined = diff_out
+            return GitDiff(diff=combined, staged=True, files=files)
         except Exception as e:
             print(f"❌ Error getting staged diff: {e}")
             return None
@@ -245,22 +294,25 @@ class GitService:
     def stage_all_changes(repo_path: Optional[str] = None) -> bool:
         """Stage all changes"""
         try:
-            _, _, code = GitService.run_git_command(["git", "add", "-A"], cwd=repo_path)
+            _, _, code = GitService.run_git_command(["git", "add", "-A"], cwd=repo_path, timeout=30)
             return code == 0
         except Exception as e:
             print(f"❌ Error staging changes: {e}")
             return False
 
     @staticmethod
-    def commit_with_message(message: str, repo_path: str, commit_datetime: Optional[str] = None) -> bool:
-        """Commit with the given message"""
+    def commit_with_message_detailed(
+        message: str, repo_path: Optional[str] = None, commit_datetime: Optional[str] = None
+    ) -> Tuple[bool, str]:
+        """Commit with the given message and return (success, details)."""
         temp_file = None
         try:
+            extra_env = None
             if commit_datetime is not None:
-                # Set the GIT_AUTHOR_DATE environment variable
-                os.environ["GIT_AUTHOR_DATE"] = commit_datetime
-                # Set the GIT_COMMITTER_DATE environment variable
-                os.environ["GIT_COMMITTER_DATE"] = commit_datetime
+                extra_env = {
+                    "GIT_AUTHOR_DATE": commit_datetime,
+                    "GIT_COMMITTER_DATE": commit_datetime,
+                }
 
             with tempfile.NamedTemporaryFile(
                 mode="w", delete=False, suffix=".txt", encoding="utf-8"
@@ -268,17 +320,19 @@ class GitService:
                 f.write(message)
                 temp_file = f.name
 
-            _, _, code = GitService.run_git_command(["git", "commit", "-F", temp_file], cwd=repo_path)
+            stdout, stderr, code = GitService.run_git_command(
+                ["git", "commit", "-F", temp_file],
+                cwd=repo_path,
+                timeout=30,
+                env=extra_env,
+            )
 
-            # Clear the environment variables
-            if commit_datetime is not None:
-                del os.environ["GIT_AUTHOR_DATE"]
-                del os.environ["GIT_COMMITTER_DATE"]
-
-            return True
+            if code == 0:
+                return True, stdout.strip() or "Commit created successfully."
+            err = stderr.strip() or stdout.strip() or "Git commit failed."
+            return False, err
         except Exception as e:
-            print(f"❌ Commit failed: {e}")
-            return False
+            return False, str(e)
         finally:
             if temp_file and os.path.exists(temp_file):
                 try:
@@ -287,19 +341,35 @@ class GitService:
                     pass
 
     @staticmethod
+    def commit_with_message(
+        message: str, repo_path: Optional[str] = None, commit_datetime: Optional[str] = None
+    ) -> bool:
+        """Commit with the given message."""
+        success, err = GitService.commit_with_message_detailed(message, repo_path, commit_datetime)
+        if not success:
+            print(f"❌ Commit failed: {err}")
+        return success
+
+    @staticmethod
     def get_repository_root(repo_path: Optional[str] = None) -> Optional[str]:
-        """Get the root directory of the git repository."""
+        """Get the root directory of the git repository (cached)."""
         try:
+            key = str(Path(repo_path or os.getcwd()).resolve())
+            cached = GitService._root_cache.get(key)
+            if cached and os.path.exists(os.path.join(cached, ".git")):
+                return cached
+
             stdout, _, code = GitService.run_git_command(
                 ["git", "rev-parse", "--show-toplevel"],
                 cwd=repo_path,
             )
-            if code == 0:
-                return stdout.strip()
+            if code == 0 and stdout.strip():
+                root = stdout.strip()
+                GitService._root_cache[key] = root
+                return root
             return None
         except Exception:
             return None
-
 
     @staticmethod
     def get_current_branch(repo_path: Optional[str] = None) -> str:
@@ -311,7 +381,6 @@ class GitService:
             )
             if code == 0 and stdout.strip():
                 return stdout.strip()
-            # Fallback for older git versions or detached HEAD
             stdout, _, code = GitService.run_git_command(
                 ["git", "rev-parse", "--abbrev-ref", "HEAD"],
                 cwd=repo_path,
@@ -332,14 +401,70 @@ class GitService:
             return False
 
     @staticmethod
+    def _parse_porcelain_branch_line(header: str) -> Tuple[str, int]:
+        """Extract (branch_name, unpushed_count) from a `git status --porcelain=v1 -b` header line."""
+        branch = "unknown"
+        unpushed = 0
+        if not header.startswith("## "):
+            return branch, unpushed
+
+        info = header[3:].strip()
+        if info.startswith("No commits yet on "):
+            branch = info[len("No commits yet on "):].strip()
+        elif info.startswith("Initial commit on "):
+            branch = info[len("Initial commit on "):].strip()
+        elif info.startswith("HEAD"):
+            branch = "HEAD (detached)"
+        else:
+            branch = info.split("...")[0].split(" [")[0].strip() or "unknown"
+
+        ahead_match = re.search(r"\[[^\]]*ahead (\d+)", info)
+        if ahead_match:
+            unpushed = int(ahead_match.group(1))
+        return branch, unpushed
+
+    @staticmethod
+    def _parse_porcelain_entry(line: str) -> Optional[Dict]:
+        """Parse one entry line from `git status --porcelain=v1`."""
+        if len(line) < 4:
+            return None
+        index_status = line[0]
+        work_status = line[1]
+        filename = line[3:].rstrip("\r\n")
+        if " -> " in filename:
+            filename = filename.split(" -> ")[-1]
+        if filename.startswith('"') and filename.endswith('"') and len(filename) >= 2:
+            filename = filename[1:-1]
+
+        is_staged = index_status not in (" ", "?", "!")
+        status_type = "Modified"
+        if index_status == "?" or work_status == "?":
+            status_type = "Untracked"
+        elif index_status == "A" or work_status == "A":
+            status_type = "Added"
+        elif index_status == "D" or work_status == "D":
+            status_type = "Deleted"
+        elif index_status == "R" or work_status == "R":
+            status_type = "Renamed"
+
+        return {
+            "file": filename,
+            "staged": is_staged,
+            "index_status": index_status,
+            "work_status": work_status,
+            "status_type": status_type,
+        }
+
+    @staticmethod
     def get_repo_status_summary(repo_path: Optional[str] = None) -> Dict:
-        """Get summary of repository git status including staged, unstaged, and branch."""
+        """Get repository git status summary in a single git invocation."""
         summary = {
             "is_repo": False,
             "branch": "unknown",
             "staged_files": [],
             "unstaged_files": [],
             "untracked_files": [],
+            "unpushed_count": 0,
         }
         if not repo_path:
             return summary
@@ -349,46 +474,47 @@ class GitService:
             return summary
 
         summary["is_repo"] = True
-        summary["branch"] = GitService.get_current_branch(root)
 
-        # Staged files
-        stdout, _, _ = GitService.run_git_command(
-            ["git", "diff", "--cached", "--name-status"],
+        stdout, _, code = GitService.run_git_command(
+            ["git", "status", "--porcelain=v1", "-b", "-u"],
             cwd=root,
         )
-        for line in stdout.splitlines():
-            line = line.strip()
-            if line:
-                parts = line.split(maxsplit=1)
-                status = parts[0] if len(parts) > 0 else "M"
-                filename = parts[1] if len(parts) > 1 else line
-                summary["staged_files"].append({"status": status, "file": filename})
+        if code != 0:
+            stdout, _, code = GitService.run_git_command(
+                ["git", "status", "--porcelain", "-b"],
+                cwd=root,
+            )
+            if code != 0:
+                summary["branch"] = GitService.get_current_branch(root)
+                return summary
 
-        # Unstaged modified files
-        stdout, _, _ = GitService.run_git_command(
-            ["git", "diff", "--name-status"],
-            cwd=root,
-        )
-        for line in stdout.splitlines():
-            line = line.strip()
-            if line:
-                parts = line.split(maxsplit=1)
-                status = parts[0] if len(parts) > 0 else "M"
-                filename = parts[1] if len(parts) > 1 else line
-                summary["unstaged_files"].append({"status": status, "file": filename})
+        lines = stdout.splitlines()
+        if lines and lines[0].startswith("## "):
+            branch, unpushed = GitService._parse_porcelain_branch_line(lines[0])
+            summary["branch"] = branch
+            summary["unpushed_count"] = unpushed
+            entry_lines = lines[1:]
+        else:
+            summary["branch"] = GitService.get_current_branch(root)
+            entry_lines = lines
 
-        # Untracked files
-        stdout, _, _ = GitService.run_git_command(
-            ["git", "ls-files", "--others", "--exclude-standard"],
-            cwd=root,
-        )
-        for line in stdout.splitlines():
-            line = line.strip()
-            if line:
-                summary["untracked_files"].append(line)
+        for line in entry_lines:
+            parsed = GitService._parse_porcelain_entry(line)
+            if not parsed:
+                continue
+            x = parsed["index_status"]
+            y = parsed["work_status"]
+            filename = parsed["file"]
 
-        # Unpushed count
-        summary["unpushed_count"] = GitService.get_unpushed_commits_count(root)
+            if x == "?" and y == "?":
+                summary["untracked_files"].append(filename)
+            elif x == "!" and y == "!":
+                continue
+            else:
+                if x != " ":
+                    summary["staged_files"].append({"status": x, "file": filename})
+                if y != " ":
+                    summary["unstaged_files"].append({"status": y, "file": filename})
 
         return summary
 
@@ -410,7 +536,9 @@ class GitService:
             return 0
 
     @staticmethod
-    def push_commits(repo_path: Optional[str] = None, remote: str = "origin", branch: Optional[str] = None) -> Tuple[bool, str]:
+    def push_commits(
+        repo_path: Optional[str] = None, remote: str = "origin", branch: Optional[str] = None
+    ) -> Tuple[bool, str]:
         """Push commits to the remote repository. Returns (success, message)."""
         try:
             root = GitService.get_repository_root(repo_path)
@@ -424,18 +552,19 @@ class GitService:
             elif remote and curr_branch and curr_branch != "unknown":
                 cmd.extend(["-u", remote, curr_branch])
 
-            stdout, stderr, code = GitService.run_git_command(cmd, cwd=root)
+            stdout, stderr, code = GitService.run_git_command(cmd, cwd=root, timeout=60)
             if code == 0:
                 msg = stdout.strip() or stderr.strip() or "Pushed to remote successfully."
                 return True, msg
-            else:
-                err = stderr.strip() or stdout.strip() or "Push failed."
-                return False, err
+            err = stderr.strip() or stdout.strip() or "Push failed."
+            return False, err
         except Exception as e:
             return False, str(e)
 
     @staticmethod
-    def pull_commits(repo_path: Optional[str] = None, remote: str = "origin", branch: Optional[str] = None) -> Tuple[bool, str]:
+    def pull_commits(
+        repo_path: Optional[str] = None, remote: str = "origin", branch: Optional[str] = None
+    ) -> Tuple[bool, str]:
         """Pull latest changes from the remote repository."""
         try:
             root = GitService.get_repository_root(repo_path)
@@ -449,13 +578,12 @@ class GitService:
             elif remote and curr_branch and curr_branch != "unknown":
                 cmd.extend([remote, curr_branch])
 
-            stdout, stderr, code = GitService.run_git_command(cmd, cwd=root)
+            stdout, stderr, code = GitService.run_git_command(cmd, cwd=root, timeout=60)
             if code == 0:
                 msg = stdout.strip() or stderr.strip() or "Already up to date."
                 return True, msg
-            else:
-                err = stderr.strip() or stdout.strip() or "Pull failed."
-                return False, err
+            err = stderr.strip() or stdout.strip() or "Pull failed."
+            return False, err
         except Exception as e:
             return False, str(e)
 
@@ -478,9 +606,13 @@ class GitService:
             root = GitService.get_repository_root(repo_path)
             if not root:
                 return False
-            _, _, code = GitService.run_git_command(["git", "restore", "--staged", "--", file_path], cwd=root)
+            _, _, code = GitService.run_git_command(
+                ["git", "restore", "--staged", "--", file_path], cwd=root
+            )
             if code != 0:
-                _, _, code = GitService.run_git_command(["git", "reset", "HEAD", "--", file_path], cwd=root)
+                _, _, code = GitService.run_git_command(
+                    ["git", "reset", "HEAD", "--", file_path], cwd=root
+                )
             return code == 0
         except Exception:
             return False
@@ -493,11 +625,17 @@ class GitService:
             if not root:
                 return ""
             if staged_only:
-                stdout, _, _ = GitService.run_git_command(["git", "diff", "--cached", "--", file_path], cwd=root)
+                stdout, _, _ = GitService.run_git_command(
+                    ["git", "diff", "--cached", "--", file_path], cwd=root
+                )
             else:
-                stdout, _, _ = GitService.run_git_command(["git", "diff", "HEAD", "--", file_path], cwd=root)
+                stdout, _, _ = GitService.run_git_command(
+                    ["git", "diff", "HEAD", "--", file_path], cwd=root
+                )
                 if not stdout.strip():
-                    stdout, _, _ = GitService.run_git_command(["git", "diff", "--", file_path], cwd=root)
+                    stdout, _, _ = GitService.run_git_command(
+                        ["git", "diff", "--", file_path], cwd=root
+                    )
             return stdout
         except Exception:
             return ""
@@ -511,39 +649,23 @@ class GitService:
             if not root:
                 return results
 
-            stdout, _, code = GitService.run_git_command(["git", "status", "--porcelain", "-uall"], cwd=root)
+            stdout, _, code = GitService.run_git_command(
+                ["git", "status", "--porcelain=v1", "-u"], cwd=root
+            )
+            if code != 0:
+                stdout, _, code = GitService.run_git_command(
+                    ["git", "status", "--porcelain"], cwd=root
+                )
             if code != 0:
                 return results
 
             for line in stdout.splitlines():
-                if len(line) >= 4:
-                    index_status = line[0]
-                    work_status = line[1]
-                    filename = line[3:].strip()
-                    if " -> " in filename:
-                        filename = filename.split(" -> ")[-1].strip()
-
-                    is_staged = index_status not in (" ", "?", "!")
-                    
-                    status_type = "Modified"
-                    if index_status == "A" or work_status == "A" or index_status == "?" or work_status == "?":
-                        status_type = "Untracked" if index_status == "?" else "Added"
-                    elif index_status == "D" or work_status == "D":
-                        status_type = "Deleted"
-                    elif index_status == "R" or work_status == "R":
-                        status_type = "Renamed"
-
-                    results.append({
-                        "file": filename,
-                        "staged": is_staged,
-                        "index_status": index_status,
-                        "work_status": work_status,
-                        "status_type": status_type,
-                    })
+                parsed = GitService._parse_porcelain_entry(line)
+                if parsed:
+                    results.append(parsed)
         except Exception:
             pass
         return results
-
 
 
 def get_repo_info(repo_path: str) -> Dict:
@@ -566,7 +688,7 @@ def run_git_command(cmd: List[str], cwd: Optional[str] = None) -> Tuple[str, str
     return GitService.run_git_command(cmd, cwd=cwd)
 
 
-def get_staged_diff(repo_path: str) -> Optional[GitDiff]:
+def get_staged_diff(repo_path: Optional[str] = None) -> Optional[GitDiff]:
     return GitService.get_staged_diff(repo_path)
 
 
@@ -582,7 +704,15 @@ def unstage_all_changes(repo_path: Optional[str] = None) -> bool:
     return GitService.unstage_all_changes(repo_path)
 
 
-def pull_commits(repo_path: Optional[str] = None, remote: str = "origin", branch: Optional[str] = None) -> Tuple[bool, str]:
+def commit_with_message(
+    message: str, repo_path: Optional[str] = None, commit_datetime: Optional[str] = None
+) -> bool:
+    return GitService.commit_with_message(message, repo_path, commit_datetime)
+
+
+def pull_commits(
+    repo_path: Optional[str] = None, remote: str = "origin", branch: Optional[str] = None
+) -> Tuple[bool, str]:
     return GitService.pull_commits(repo_path, remote, branch)
 
 
